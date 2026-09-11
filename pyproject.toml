@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "microscaling-quant"
+version = "0.0.1"
+description = "Granular microscaling (MX) quantization ops. mxq."
+requires-python = ">=3.10"
+dependencies = ["torch", "numpy"]
+
+[tool.setuptools.packages.find]
+include = ["mxq*"]

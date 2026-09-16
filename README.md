@@ -49,6 +49,7 @@ mxq/
   block_ocp/         scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.ocp
   ocp/               Microsoft microxcaling code, verbatim (MIT). Oracle only; see ocp/UPSTREAM.md
   rounding/          ties_away | rne | truncate, on float32 bit patterns (round_bits) or integers (round_int)
+  arith.py           exact_add (exact sum, one rounding), saturate_product: the operations between quantizations
   _blocks.py         split along an axis into 32-blocks, pad, reassemble
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
 ```

@@ -10,9 +10,10 @@ compositions are provided.
     block_mxquant     MXQuant simulation     = scale_factor.mxquant + element_quant.float_em (qtorch grid)
     ocp               Microsoft microxcaling, verbatim: the oracle block_ocp is validated against
     rounding          ties_away | rne | truncate, on float32 bit patterns or integers; shared by every quantizer
+    arith             exact_add (add exactly, round once) and saturate_product: what a PE does between quantizations
 
 Every block quantizer has the same interface:  P, X = quantize(V, fmt, axis)   V_hat = P * expand(X)
 """
-from . import ocp, rounding, scale_factor, element_quant, block_ocp, block_mxquant
+from . import ocp, rounding, arith, scale_factor, element_quant, block_ocp, block_mxquant
 
-__all__ = ["ocp", "rounding", "scale_factor", "element_quant", "block_ocp", "block_mxquant"]
+__all__ = ["ocp", "rounding", "arith", "scale_factor", "element_quant", "block_ocp", "block_mxquant"]

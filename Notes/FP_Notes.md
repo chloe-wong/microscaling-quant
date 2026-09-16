@@ -11,9 +11,9 @@ The two differ in the formula for step 1 and the function used for step 2.
 |---|---|---|
 | **step 1: scale factor** | `2 ^ floor(log2 amax)` | `2 ^ (floor(log2 amax) - emax)`; shared exponent clamped below at -127, NaN above 127 (E8M0 range) |
 | emax | not used | e4m3: 8, e5m2: 15, e3m2: 4, e2m3: 2, e2m1: 2 |
-| block max lands in | [1, 2) | top binade of the format; saturates to max_norm (448 / 57344 / 28 / 7.5 / 6) |
-| codes actually used | only those <= 2 (fp4: 0, 0.5, 1, 1.5, 2) | whole format |
-| headroom above block max | 8 binades (e4m3) | none |
+| block max lands in | [1, 2) (float32 `log2` can round up at a binade edge, giving 1 - 2^-24) | top binade of the format; saturates to max_norm (448 / 57344 / 28 / 7.5 / 6) |
+| codes actually used | only those <= 2 for finite inputs (fp4: 0, 0.5, 1, 1.5, 2) | whole format |
+| headroom above block max | ~7 binades (e4m3: codes reach 240) | none |
 | zero block | scale clamped to 1e-38 | shared exponent clamped |
 | **step 2: element quantization** | qtorch `float_quantize(z, exp=e, man=m, rounding="nearest")` | Microsoft `_quantize_elemwise(z, fmt, round, saturate_normals=True, allow_denorm=True)` |
 | exponent bias | IEEE: 2^(e-1) - 1, top exponent reserved | OCP: top exponent used for normals (e4m3 max 448, no Inf) |
@@ -25,19 +25,21 @@ The two differ in the formula for step 1 and the function used for step 2.
 
 ## Measured differences (firesim2, 2026-09-15)
 
-Same power-of-two scales, values in [-2, 2], 1M Gaussian samples. Fraction of codes where
-qtorch `float_quantize` != Microsoft `_quantize_elemwise`:
+Same power-of-two scales, values in [-2, 2] (Gaussian x 0.7), 1M samples, both with round=nearest.
+Fraction of codes where qtorch `float_quantize` != Microsoft `_quantize_elemwise`, compared by value
+(bit-compare is higher: 1.2 / 15.8 / 59.3 / 36.7 %, because Microsoft flushes negatives to -0.0 and qtorch to +0.0):
 
-| format | differ | differ within normal range |
+| format | differ | differ at or above the OCP min-normal |
 |---|---|---|
 | fp8_e4m3 | 1.1 % | 0 % |
 | fp6_e3m2 | 13.9 % | 0 % |
 | fp6_e2m3 | 55.8 % | 0 % |
 | fp4_e2m1 | 22.7 % | 0 % |
 
-All differences are below the format's minimum normal, i.e. subnormal handling. The narrow formats
-are hit hardest because their minimum normal is 1.0 and the [1, 2) scale placement puts most
-elements below it.
+All differences are below the OCP minimum normal (2^-6 / 0.25 / 1 / 1), i.e. subnormal handling.
+qtorch's own lowest binade [2^-L, 2^-L+1) sits one below OCP's min-normal, and inside it the two
+differ for 0.4 / 6.8 / 16.1 / 16.1 % of values. The narrow formats are hit hardest because their
+minimum normal is 1.0 and the [1, 2) scale placement puts most elements below it.
 
 ## Relation to the RTL
 

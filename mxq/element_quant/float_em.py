@@ -9,6 +9,10 @@ set of representable values.
                     subnormals with step 2^(emin-m), overflow -> Inf, NaN/Inf propagate. This is hardfloat's
                     RoundAnyRawFNToRecFN, i.e. the mesh lane accumulators; with round="rne" it is bit-identical
                     to the gemmini golden `fp_quantize_rne`. (8, 7) is bf16.
+    grid="ocp"      The OCP MX element formats (E4M3, E5M2, E3M2, E2M3, E2M1 only): same emin and subnormals as
+                    ieee, but the top exponent holds normals (E4M3 max 448) and values beyond max_norm SATURATE.
+                    Bit-identical to microxcaling `_quantize_elemwise(saturate_normals=True, allow_denorm=True)`
+                    with round nearest/even/floor = ties_away/rne/truncate. These are MX-Gemmini's operand codes.
 
 `round` is one of mxq.rounding.MODES: "ties_away" | "rne" | "truncate".
 Input is cast to float32 unless it is float64, in which case the ieee grid rounds from float64 directly
@@ -20,7 +24,7 @@ from .. import rounding
 
 __all__ = ["quantize", "max_value", "min_normal", "GRIDS"]
 
-GRIDS = ("qtorch", "ieee")
+GRIDS = ("qtorch", "ieee", "ocp")
 _U32 = 0xFFFFFFFF
 
 
@@ -44,6 +48,8 @@ def quantize(z: torch.Tensor, e: int, m: int, round: str = "ties_away", grid: st
         return _qtorch(z, e, m, round)
     if grid == "ieee":
         return _ieee(z, e, m, round)
+    if grid == "ocp":
+        return _ocp(z, e, m, round)
     raise ValueError(f"grid must be one of {GRIDS}, got {grid!r}")
 
 
@@ -91,4 +97,29 @@ def _ieee(z, e, m, round):
     out = torch.where(finite_nz, torch.copysign(val, x), x)      # NaN, Inf, +-0 pass through
     if e < 8:                                                     # golden scalar path: underflow -> +0.0;
         out = torch.where(finite_nz & (val == 0), torch.zeros_like(out), out)   # its e=8 bit path keeps the sign
+    return out.to(torch.float32)
+
+
+def _ocp(z, e, m, round):
+    """OCP element grid: ieee's emin and subnormal step, emax/max_norm from the format table, saturate.
+    Zero-sign follows microxcaling: an exact +-0 input becomes +0.0; a negative value that rounds to zero
+    becomes -0.0. Inf and NaN pass through."""
+    from .formats import FORMATS
+    f = next((f for f in FORMATS.values() if (f.e, f.m) == (e, m)), None)
+    if f is None:
+        raise ValueError(f"grid='ocp' is defined only for the OCP element formats, not (e={e}, m={m})")
+    x = z.detach()
+    x = x if x.dtype == torch.float64 else x.to(torch.float32)
+    emin = 1 - ((1 << (e - 1)) - 1)
+
+    ax = x.abs()
+    finite_nz = torch.isfinite(x) & (ax != 0)
+    _, exp = torch.frexp(torch.where(finite_nz, ax, torch.ones_like(ax)))
+    E = (exp - 1).to(x.dtype)
+    step = torch.exp2(torch.clamp(E, min=float(emin)) - m)
+    val = rounding.round_int(ax / step, round) * step
+    val = torch.clamp(val, max=f.max_norm)                       # saturate_normals
+
+    out = torch.where(finite_nz, torch.copysign(val, x), x)      # Inf, NaN pass through; -tiny -> -0.0
+    out = torch.where(x == 0, torch.zeros_like(out), out)        # exact +-0 -> +0.0
     return out.to(torch.float32)

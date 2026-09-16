@@ -43,7 +43,8 @@ S = float_em.quantize(S, e=6, m=9)              # bit-identical to qtorch.float_
 ```
 mxq/
   scale_factor/      step 1   mxquant(amax) = 2^floor(log2 amax)        ocp(amax, emax) = 2^(floor(log2 amax) - emax)
-  element_quant/     step 2   float_em (== qtorch float_quantize)        microsoft (microxcaling _quantize_elemwise)
+  element_quant/     step 2   float_em(x, e, m, round=, grid=)  grid: qtorch (MXQuant) | ieee (accumulators) | ocp (MX operands)
+                              microsoft: microxcaling _quantize_elemwise, verbatim, reference only
                               formats.py: one table of e, m, emax, max_norm per format
   block_mxquant/   scale_factor.mxquant + element_quant.float_em   -> MXQuant's simulation (all reported perplexities)
   block_ocp/         scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.ocp

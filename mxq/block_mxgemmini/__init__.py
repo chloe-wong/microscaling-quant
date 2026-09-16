@@ -1,0 +1,44 @@
+"""mxq.block_mxgemmini — the block quantization used for the linear-layer inputs in MXQuant's
+systolic-array simulation (linear_e2e_wrap / complete_integration_e2e `mx_block32_quantize`),
+i.e. the scheme behind the MX-Gemmini tapeout results.
+
+    P, X = quantize(V, "MXFP8_E4M3", axis=0)        V_hat = P * expand(X)
+    V_hat = dequantize(P, X, axis=0)
+
+= scale_factor.mxquant (X = 2^floor(log2 amax), block max in [1, 2), no emax offset) followed by
+  element_quant.float_em (float(e, m) codes, bit-identical to qtorch.float_quantize "nearest").
+
+P and X are bit-identical to `mx_block32_quantize(V, fmt, axis="col"|"row")` with axis=0|1.
+Differences from OCP are listed in Notes/FP_Notes.md.
+"""
+from typing import Tuple, Union
+
+import torch
+
+from .. import _blocks
+from ..scale_factor import mxquant as _scale
+from ..element_quant import float_em as _elem
+from ..element_quant.formats import Format, get
+
+__all__ = ["quantize", "dequantize"]
+
+BLOCK = 32
+
+
+def quantize(V: torch.Tensor, fmt: Union[str, Format], axis: int = 0,
+             block_size: int = BLOCK) -> Tuple[torch.Tensor, torch.Tensor]:
+    """MXQuant block quantize V along `axis`. Returns (P codes, X power-of-two scales), float32."""
+    V = V.to(torch.float32)
+    f = get(fmt)
+    b = _blocks.to_blocks(V, axis, block_size)
+    if f is None:  # FP32 pass-through: identity codes, unit scales (as mx_block32_quantize)
+        X = torch.ones(b.data.shape[:-1] + (1,), dtype=V.dtype, device=V.device)
+        return _blocks.codes_from_blocks(b.data, b), _blocks.scales_from_blocks(X, b)
+    amax = b.data.abs().amax(dim=-1, keepdim=True)
+    X = _scale(amax)
+    P = _elem.quantize(b.data / X, f.e, f.m)
+    return _blocks.codes_from_blocks(P, b), _blocks.scales_from_blocks(X, b)
+
+
+def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = BLOCK) -> torch.Tensor:
+    return _blocks.dequantize(P, X, axis, block_size)

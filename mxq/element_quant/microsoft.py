@@ -12,7 +12,7 @@ from ..ocp.formats import ElemFormat
 from ..ocp.elemwise import _quantize_elemwise
 from .formats import Format, get
 
-__all__ = ["quantize", "quantizer"]
+__all__ = ["quantize"]
 
 
 def quantize(z: torch.Tensor, fmt: Union[str, Format], round: str = "even",
@@ -22,7 +22,3 @@ def quantize(z: torch.Tensor, fmt: Union[str, Format], round: str = "even",
         return z
     return _quantize_elemwise(z, ElemFormat.from_str(f.ocp), round=round,
                               saturate_normals=saturate_normals, allow_denorm=allow_denorm)
-
-
-def quantizer(fmt: Union[str, Format], round: str = "even", **kw):
-    return lambda z: quantize(z, fmt, round, **kw)

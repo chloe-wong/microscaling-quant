@@ -14,30 +14,20 @@ from typing import Tuple, Union
 
 import torch
 
-from .. import _blocks
-from ..scale_factor import ocp as _scale
-from ..element_quant import microsoft as _elem
+from .. import _blocks, scale_factor
+from ..element_quant import microsoft
 from ..element_quant.formats import Format, get
 
 __all__ = ["quantize", "dequantize"]
 
-BLOCK = 32
 
-
-def quantize(V: torch.Tensor, fmt: Union[str, Format], axis: int = 0, block_size: int = BLOCK,
+def quantize(V: torch.Tensor, fmt: Union[str, Format], axis: int = 0, block_size: int = _blocks.BLOCK,
              round: str = "even", scale_bits: int = 8) -> Tuple[torch.Tensor, torch.Tensor]:
     """OCP block quantize V along `axis`. Returns (P codes, X power-of-two scales), float32."""
-    V = V.to(torch.float32)
     f = get(fmt)
-    b = _blocks.to_blocks(V, axis, block_size)
-    if f is None:  # FP32 pass-through
-        X = torch.ones(b.data.shape[:-1] + (1,), dtype=V.dtype, device=V.device)
-        return _blocks.codes_from_blocks(b.data, b), _blocks.scales_from_blocks(X, b)
-    amax = b.data.abs().amax(dim=-1, keepdim=True)
-    X = _scale(amax, f.emax, scale_bits)
-    P = _elem.quantize(b.data / X, f, round=round, saturate_normals=True, allow_denorm=True)
-    return _blocks.codes_from_blocks(P, b), _blocks.scales_from_blocks(X, b)
+    return _blocks.quantize(V, axis, block_size, passthrough=f is None,
+                            scale=lambda amax: scale_factor.ocp(amax, f.emax, scale_bits),   # step 1
+                            elem=lambda z: microsoft.quantize(z, f, round=round))            # step 2
 
 
-def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = BLOCK) -> torch.Tensor:
-    return _blocks.dequantize(P, X, axis, block_size)
+dequantize = _blocks.dequantize

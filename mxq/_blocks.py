@@ -1,24 +1,23 @@
-"""Shared plumbing for block quantizers: split a tensor into blocks along one axis, pad,
-and put codes / scales back into the caller's layout.
+"""Shared plumbing for block quantizers: split a tensor into blocks along one axis, pad, run
+the two steps, and put codes / scales back into the caller's layout.
 
 Layout contract (same as MXQuant's mx_block32_quantize):
   quantize(V, axis) -> (P, X)   P: same shape as V, the codes
                                 X: V.shape with V.shape[axis] replaced by ceil(V.shape[axis]/block_size)
   V_hat = P * expand(X)  where expand repeats each scale block_size times along axis.
 """
-from typing import NamedTuple
+from typing import Callable, NamedTuple, Tuple
 
 import torch
 import torch.nn.functional as F
 
-__all__ = ["Blocks", "to_blocks", "codes_from_blocks", "scales_from_blocks", "expand_scales", "dequantize"]
+BLOCK = 32
 
 
 class Blocks(NamedTuple):
     data: torch.Tensor   # (..., nblocks, block_size), block axis moved last, zero-padded
     axis: int
     n: int               # original length along axis
-    block_size: int
 
 
 def to_blocks(V: torch.Tensor, axis: int, block_size: int) -> Blocks:
@@ -28,14 +27,12 @@ def to_blocks(V: torch.Tensor, axis: int, block_size: int) -> Blocks:
     pad = (-n) % block_size
     if pad:
         Vt = F.pad(Vt, (0, pad))
-    nb = Vt.shape[-1] // block_size
-    return Blocks(Vt.reshape(*Vt.shape[:-1], nb, block_size), axis, n, block_size)
+    return Blocks(Vt.reshape(*Vt.shape[:-1], -1, block_size), axis, n)
 
 
 def codes_from_blocks(P: torch.Tensor, b: Blocks) -> torch.Tensor:
     """(..., nblocks, block_size) -> original layout, padding removed."""
-    Pt = P.reshape(*P.shape[:-2], -1)[..., : b.n]
-    return Pt.movedim(-1, b.axis).contiguous()
+    return P.reshape(*P.shape[:-2], -1)[..., : b.n].movedim(-1, b.axis).contiguous()
 
 
 def scales_from_blocks(X: torch.Tensor, b: Blocks) -> torch.Tensor:
@@ -43,12 +40,22 @@ def scales_from_blocks(X: torch.Tensor, b: Blocks) -> torch.Tensor:
     return X.squeeze(-1).movedim(-1, b.axis).contiguous()
 
 
-def expand_scales(X: torch.Tensor, axis: int, n: int, block_size: int) -> torch.Tensor:
-    axis = axis % X.ndim
-    Xe = torch.repeat_interleave(X, block_size, dim=axis)
-    return Xe.narrow(axis, 0, n)
+def quantize(V: torch.Tensor, axis: int, block_size: int, passthrough: bool,
+             scale: Callable[[torch.Tensor], torch.Tensor],
+             elem: Callable[[torch.Tensor], torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Driver: block V, then X = scale(amax) (step 1) and P = elem(V / X) (step 2).
+    passthrough (FP32): identity codes, unit scales. Computes in float32."""
+    V = V.to(torch.float32)
+    b = to_blocks(V, axis, block_size)
+    if passthrough:
+        P, X = b.data, torch.ones(b.data.shape[:-1] + (1,), dtype=torch.float32, device=V.device)
+    else:
+        X = scale(b.data.abs().amax(dim=-1, keepdim=True))
+        P = elem(b.data / X)
+    return codes_from_blocks(P, b), scales_from_blocks(X, b)
 
 
-def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int, block_size: int = 32) -> torch.Tensor:
+def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = BLOCK) -> torch.Tensor:
     axis = axis % P.ndim
-    return P * expand_scales(X, axis, P.shape[axis], block_size)
+    Xe = torch.repeat_interleave(X, block_size, dim=axis).narrow(axis, 0, P.shape[axis])
+    return P * Xe

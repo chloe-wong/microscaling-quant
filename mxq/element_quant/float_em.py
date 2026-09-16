@@ -16,7 +16,7 @@ magnitude is 2^-L with full mantissa, then everything below 2^(-L-1) flushes to 
 """
 import torch
 
-__all__ = ["quantize", "quantizer", "max_value", "min_normal"]
+__all__ = ["quantize", "max_value", "min_normal"]
 
 _U32 = 0xFFFFFFFF
 
@@ -30,15 +30,15 @@ def min_normal(e: int) -> float:
     return 2.0 ** -((1 << (e - 1)) - 1)
 
 
-def quantize(x: torch.Tensor, e: int, m: int, round: str = "nearest") -> torch.Tensor:
+def quantize(z: torch.Tensor, e: int, m: int, round: str = "nearest") -> torch.Tensor:
     """Quantize to float(e, m). Input is cast to float32 (as qtorch requires); output float32."""
     if round != "nearest":
         raise NotImplementedError("only rounding='nearest' (qtorch semantics) is implemented")
     if not (1 <= e <= 8 and 1 <= m <= 22):
         raise ValueError(f"unsupported widths e={e}, m={m}")
 
-    x32 = x.detach().to(torch.float32).contiguous()
-    bits = x32.view(torch.int32).to(torch.int64) & _U32
+    z32 = z.detach().to(torch.float32).contiguous()
+    bits = z32.view(torch.int32).to(torch.int64) & _U32
 
     # 1. round mantissa (unsigned 32-bit wraparound like the C kernel)
     mask = (1 << (23 - m)) - 1
@@ -63,8 +63,3 @@ def quantize(x: torch.Tensor, e: int, m: int, round: str = "nearest") -> torch.T
 
     q = torch.where(q >= 1 << 31, q - (1 << 32), q).to(torch.int32)
     return q.view(torch.float32)
-
-
-def quantizer(e: int, m: int, round: str = "nearest"):
-    """Return f(x) = quantize(x, e, m)."""
-    return lambda x: quantize(x, e, m, round)

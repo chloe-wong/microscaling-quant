@@ -15,30 +15,20 @@ from typing import Tuple, Union
 
 import torch
 
-from .. import _blocks
-from ..scale_factor import mxquant as _scale
-from ..element_quant import float_em as _elem
+from .. import _blocks, scale_factor
+from ..element_quant import float_em
 from ..element_quant.formats import Format, get
 
 __all__ = ["quantize", "dequantize"]
 
-BLOCK = 32
-
 
 def quantize(V: torch.Tensor, fmt: Union[str, Format], axis: int = 0,
-             block_size: int = BLOCK) -> Tuple[torch.Tensor, torch.Tensor]:
+             block_size: int = _blocks.BLOCK) -> Tuple[torch.Tensor, torch.Tensor]:
     """MXQuant block quantize V along `axis`. Returns (P codes, X power-of-two scales), float32."""
-    V = V.to(torch.float32)
     f = get(fmt)
-    b = _blocks.to_blocks(V, axis, block_size)
-    if f is None:  # FP32 pass-through: identity codes, unit scales (as mx_block32_quantize)
-        X = torch.ones(b.data.shape[:-1] + (1,), dtype=V.dtype, device=V.device)
-        return _blocks.codes_from_blocks(b.data, b), _blocks.scales_from_blocks(X, b)
-    amax = b.data.abs().amax(dim=-1, keepdim=True)
-    X = _scale(amax)
-    P = _elem.quantize(b.data / X, f.e, f.m)
-    return _blocks.codes_from_blocks(P, b), _blocks.scales_from_blocks(X, b)
+    return _blocks.quantize(V, axis, block_size, passthrough=f is None,
+                            scale=scale_factor.mxquant,                       # step 1
+                            elem=lambda z: float_em.quantize(z, f.e, f.m))    # step 2
 
 
-def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = BLOCK) -> torch.Tensor:
-    return _blocks.dequantize(P, X, axis, block_size)
+dequantize = _blocks.dequantize

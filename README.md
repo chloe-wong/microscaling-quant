@@ -1,0 +1,77 @@
+# microscaling-quant (`mxq`)
+
+Granular microscaling (MX) quantization ops, cleaned up from MXQuant. Pure PyTorch, no compiled extensions.
+
+## Setup
+
+Requires Python >= 3.10 and torch.
+
+```bash
+git clone git@github.com:chloe-wong/microscaling-quant.git
+cd microscaling-quant
+pip install -e .            # inside the conda env you run experiments in
+python -c "import mxq"
+```
+
+## Use
+
+Block quantization = (1) a per-block scale factor, then (2) element quantization of the scaled values.
+Every block quantizer has one interface: a matrix in, codes `P` and power-of-two scales `X` out.
+
+```python
+import torch
+from mxq import block_mxgemmini, block_ocp
+
+V = torch.randn(4096, 512)                      # e.g. A = xᵀ (K×M), blocks of 32 along K
+P, X = block_mxgemmini.quantize(V, "MXFP8_E4M3", axis=0)   # scheme used in MXQuant / tapeout sim
+P, X = block_ocp.quantize(V, "MXFP8_E4M3", axis=0)         # OCP MX v1.0 (Microsoft reference)
+V_hat = block_mxgemmini.dequantize(P, X, axis=0)           # == P * expand(X)
+```
+
+`P` has `V`'s shape. `X` has `V`'s shape with the block axis divided by 32.
+Formats: `MXFP8_E4M3`, `MXFP8_E5M2`, `MXFP6_E3M2`, `MXFP6_E2M3`, `MXFP4`, `FP32` (pass-through).
+
+Product / accumulator quantization to any float(e, m):
+
+```python
+from mxq.element_quant import float_em
+S = float_em.quantize(S, e=6, m=9)              # bit-identical to qtorch.float_quantize(..., "nearest")
+```
+
+## Structure
+
+```
+mxq/
+  scale_factor/      step 1   mxquant(amax) = 2^floor(log2 amax)        ocp(amax, emax) = 2^(floor(log2 amax) - emax)
+  element_quant/     step 2   float_em (== qtorch float_quantize)        microsoft (microxcaling _quantize_elemwise)
+                              formats.py: one table of e, m, emax, max_norm per format
+  block_mxgemmini/   scale_factor.mxquant + element_quant.float_em   -> what MXQuant's linear-layer simulation used
+  block_ocp/         scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.ocp
+  ocp/               Microsoft microxcaling code, verbatim (MIT). Oracle only; see ocp/UPSTREAM.md
+  _blocks.py         split along an axis into 32-blocks, pad, reassemble
+Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
+```
+
+The two schemes differ in both steps. `block_mxgemmini` places the block max in [1, 2) and uses qtorch's
+float(e, m) semantics (no true subnormals, top exponent reserved). `block_ocp` places the block max in
+the format's top binade and uses the OCP element formats (subnormals kept, 448 max for E4M3).
+Details and measurements: `Notes/FP_Notes.md`.
+
+## Validation
+
+Tests are local (not in the repo) and differential: each module is checked bit-for-bit against the code it
+replaces, on CPU and CUDA.
+
+| module | oracle |
+|---|---|
+| `element_quant.float_em` | `qtorch.quant.float_quantize`, 15 (e, m) pairs, 1M samples each |
+| `block_mxgemmini` | MXQuant `mx_block32_quantize` (two copies), codes and scales |
+| `block_ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
+| `ocp/` | upstream microxcaling clone, AST-verbatim and numeric |
+
+Running them needs `qtorch`, an MXQuant checkout (`MXQUANT_ROOT`) and an upstream microxcaling clone
+(`MICROXCALING_UPSTREAM`); defaults point at the firesim2 paths.
+
+```bash
+python -m pytest -q tests
+```

@@ -32,6 +32,16 @@ V_hat = block_mxquant.dequantize(P, X, axis=0)             # == P * expand(X)
 `P` has `V`'s shape. `X` has `V`'s shape with the block axis of length ceil(len/32) (last block zero-padded).
 Formats: `MXFP8_E4M3`, `MXFP8_E5M2`, `MXFP6_E3M2`, `MXFP6_E2M3`, `MXFP4`, `FP32` (pass-through).
 
+A matmul the way the PE column does it:
+
+```python
+from mxq import block_mxgemmini, matmul, schedule
+P_A, X_A = block_mxgemmini.quantize(x.t(), "MXFP8_E4M3", axis=0)      # A = xᵀ, K×M
+P_B, X_B = block_mxgemmini.quantize(W.t(), "MXFP8_E4M3", axis=0)      # B = Wᵀ, K×N
+Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), schedule.HW_FINAL)   # M×N, bit-identical to MX-Gemmini
+Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXQUANT(4, 3), schedule.HW_FINAL)  # MXQuant's simulation
+```
+
 Product / accumulator quantization to any float(e, m):
 
 ```python
@@ -52,6 +62,10 @@ mxq/
   block_ocp/         scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.ocp
   ocp/               Microsoft microxcaling code, verbatim (MIT). Oracle only; see ocp/UPSTREAM.md
   rounding/          ties_away | rne | truncate, on float32 bit patterns (round_bits) or integers (round_int)
+  matmul/            Y = Aᵀ·B from codes and scales
+    arithmetic.py    Arithmetic(product, lane_add, tile_add): MXQUANT(prod_e, prod_m) = MXQuant's simulation, MXGEMMINI() = the hardware
+    systolic.py      the 16-deep PE column: per-k product, per-lane accumulate, per-32-block rescale and accumulate
+    fp64_accum.py    same inputs, no rounding anywhere: the reducer's error floor
   schedule.py        per-lane accumulator formats: load(csv), fixed(e, m), HW_FINAL (the tapeout schedule)
   arith.py           exact_add (exact sum, one rounding), saturate_product: the operations between quantizations
   _blocks.py         split along an axis into 32-blocks, pad, reassemble
@@ -73,6 +87,8 @@ replaces, on CPU and CUDA.
 | `element_quant.float_em` | grid qtorch: `qtorch.quant.float_quantize`, 15 (e, m) pairs, 1M samples each; grid ieee: gemmini golden `fp_quantize_rne`; grid ocp: microxcaling `_quantize_elemwise` |
 | `block_mxquant` | MXQuant `mx_block32_quantize` (two copies), codes and scales |
 | `block_mxgemmini` | MXQuant `quantize_mx_block32` (round nearest); operands of npu-exploration `rtl_exact` saved hardware test case |
+| `matmul.systolic` + `MXQUANT` | MXQuant `MXLinearSim._simulate_atw`, bit-identical, 3 schedules × 3 product formats |
+| `matmul.systolic` + `MXGEMMINI` | hardware output `Y_hw` of the `rtl_exact` test case (TinyLlama MLP), 65536/65536 identical |
 | `block_ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
 | `ocp/` | upstream microxcaling clone, AST-verbatim and numeric |
 

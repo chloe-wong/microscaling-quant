@@ -9,9 +9,10 @@ compositions are provided.
     block_ocp         OCP MX v1.0            = scale_factor.ocp     + element_quant.microsoft
     block_mxgemmini   MXQuant / tapeout sim  = scale_factor.mxquant + element_quant.float_em
     ocp               Microsoft microxcaling, verbatim: the oracle block_ocp is validated against
+    rounding          ties_away | rne | truncate, on float32 bit patterns or integers; shared by every quantizer
 
 Every block quantizer has the same interface:  P, X = quantize(V, fmt, axis)   V_hat = P * expand(X)
 """
-from . import ocp, scale_factor, element_quant, block_ocp, block_mxgemmini
+from . import ocp, rounding, scale_factor, element_quant, block_ocp, block_mxgemmini
 
-__all__ = ["ocp", "scale_factor", "element_quant", "block_ocp", "block_mxgemmini"]
+__all__ = ["ocp", "rounding", "scale_factor", "element_quant", "block_ocp", "block_mxgemmini"]

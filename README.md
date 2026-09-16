@@ -16,7 +16,7 @@ python -c "import mxq"
 ## Use
 
 Block quantization = (1) a per-block scale factor, then (2) element quantization of the scaled values.
-Every block quantizer has one interface: a matrix in, codes `P` and power-of-two scales `X` out.
+Every block quantizer has one interface: a tensor in, codes `P` and power-of-two scales `X` out.
 
 ```python
 import torch
@@ -28,7 +28,7 @@ P, X = block_ocp.quantize(V, "MXFP8_E4M3", axis=0)         # OCP MX v1.0 (Micros
 V_hat = block_mxgemmini.dequantize(P, X, axis=0)           # == P * expand(X)
 ```
 
-`P` has `V`'s shape. `X` has `V`'s shape with the block axis divided by 32.
+`P` has `V`'s shape. `X` has `V`'s shape with the block axis of length ceil(len/32) (last block zero-padded).
 Formats: `MXFP8_E4M3`, `MXFP8_E5M2`, `MXFP6_E3M2`, `MXFP6_E2M3`, `MXFP4`, `FP32` (pass-through).
 
 Product / accumulator quantization to any float(e, m):

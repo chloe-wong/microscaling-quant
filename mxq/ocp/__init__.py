@@ -41,9 +41,7 @@ def bf16(x, round="even"):     return _quantize_bfloat(x, 16, round=round)
 def block_quantize(x, fmt, axis=-1, block_size=32, scale_bits=8, round="even"):
     """OCP MX block quantization: shared E8M0 exponent per block, then element quantize.
 
-    This is upstream `_quantize_mx` — the reference block algorithm. It is here for
-    comparison; mxq.block (planned) is MXQuant's block algorithm and calls the element
-    quantizers above.
+    Upstream `_quantize_mx`, dequantized output only: the oracle mxq.block_ocp is validated against.
     """
     fmt = ElemFormat.from_str(fmt) if isinstance(fmt, str) else fmt
     return _quantize_mx(x, scale_bits, fmt, axes=[axis], block_size=block_size, round=round)

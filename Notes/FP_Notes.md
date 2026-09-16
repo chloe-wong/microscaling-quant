@@ -21,7 +21,7 @@ The two differ in the formula for step 1 and the function used for step 2.
 | subnormals | one binade below min-normal keeps mantissa bits, then flush to 0 | true fixed-step subnormals down to 2^(emin - m) |
 | rounding | nearest, ties away from zero | "even" (RNE) default; "nearest" and "floor" available |
 | **output** | codes `P` and scales `X` separately | dequantized `P * X` only |
-| **where in mxq** | `mxq.block_mxgemmini.quantize(V, fmt, axis)` | `mxq.block_ocp.quantize(V, fmt, axis)`; reference impl in `mxq.ocp.block_quantize` |
+| **where in mxq** | `mxq.block_mxquant.quantize(V, fmt, axis)` | `mxq.block_ocp.quantize(V, fmt, axis)`; reference impl in `mxq.ocp.block_quantize` |
 
 ## Measured differences (firesim2, 2026-09-15)
 
@@ -46,4 +46,4 @@ minimum normal is 1.0 and the [1, 2) scale placement puts most elements below it
 The old RTL requantizer used the OCP scale factor (block max at 448). The mesh accumulates at
 exponent width 4, so chaining one tile's output into the next overflowed to NaN. The requantizer
 rework (gemmini 0b2cc2c) switched the RTL to the MXQuant scale factor (block max in [1, 2)).
-`block_mxgemmini` is therefore the one that matches hardware today.
+`block_mxquant` carries the scale rule the hardware uses today; its element codes are not the hardware's (see FIX.md F4).

@@ -21,6 +21,8 @@ class Blocks(NamedTuple):
 
 
 def to_blocks(V: torch.Tensor, axis: int, block_size: int) -> Blocks:
+    if not -V.ndim <= axis < V.ndim:
+        raise IndexError(f"axis {axis} out of range for {V.ndim}-D tensor")
     axis = axis % V.ndim
     Vt = V.movedim(axis, -1)
     n = Vt.shape[-1]
@@ -48,7 +50,7 @@ def quantize(V: torch.Tensor, axis: int, block_size: int, passthrough: bool,
     V = V.to(torch.float32)
     b = to_blocks(V, axis, block_size)
     if passthrough:
-        P, X = b.data, torch.ones(b.data.shape[:-1] + (1,), dtype=torch.float32, device=V.device)
+        P, X = b.data.clone(), torch.ones(b.data.shape[:-1] + (1,), dtype=torch.float32, device=V.device)
     else:
         X = scale(b.data.abs().amax(dim=-1, keepdim=True))
         P = elem(b.data / X)

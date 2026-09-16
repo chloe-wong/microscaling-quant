@@ -11,7 +11,7 @@ from typing import Callable
 
 import torch
 
-from .. import arith, rounding
+from .. import arith
 from ..element_quant import float_em
 
 __all__ = ["Arithmetic", "MXQUANT", "MXGEMMINI"]
@@ -42,22 +42,23 @@ def MXQUANT(prod_e: int, prod_m: int) -> Arithmetic:
 
 def MXGEMMINI(prod_e: int = 4, prod_m: int = 3) -> Arithmetic:
     """MX-Gemmini PE column (npu-exploration/rtl_exact, gemmini golden fp8_matmul_model.py):
-    product mantissa truncated to prod_m bits with no exponent clamp, then PE saturation (`mx_product_quantize_trunc`);
+    product mantissa truncated to prod_m bits with no exponent clamp (float32 subnormals kept), then PE saturation (`mx_product_quantize_trunc`);
     both addends rounded RNE to the lane's float(e, m), then added exactly and rounded once (`fp_add_exact(fp_quantize_rne, fp_quantize_rne)`);
     cross-block: tile rounded to bf16, accumulated in bf16 (`bf16_accum_add(C, q_bf16_rne(tile))`)."""
     lane = lambda x, e, m: float_em.quantize(x, e, m, round="rne", grid="ieee")
 
     def product(a, b):
         x = (a * b).to(torch.float32)
-        bits = x.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
-        t = rounding.round_bits(bits, prod_m, "truncate")
-        t = torch.where(t >= 1 << 31, t - (1 << 32), t).to(torch.int32).view(torch.float32)
-        t = torch.where(torch.isfinite(x), t, x)
+        ax = x.abs()
+        nz = torch.isfinite(x) & (ax != 0)
+        mant, ex = torch.frexp(torch.where(nz, ax, torch.ones_like(ax)))         # ax = mant * 2^ex, mant in [0.5, 1)
+        frac = torch.floor((2 * mant - 1) * (1 << prod_m)) / (1 << prod_m)      # truncate to prod_m fraction bits
+        t = torch.where(nz, torch.copysign(torch.ldexp(1 + frac, ex - 1), x), x)  # zeros, Inf, NaN pass through
         return arith.saturate_product(t, prod_e, prod_m)
 
     return Arithmetic(
         name=f"mxgemmini(prod=e{prod_e}m{prod_m})",
         product=product,
         lane_add=lambda S, p, e, m: arith.exact_add(lane(S, e, m), lane(p, e, m), e, m, round="rne", grid="ieee"),
-        tile_add=lambda C, tile: arith.exact_add(C, lane(tile, 8, 7), 8, 7, round="rne", grid="ieee"),
+        tile_add=lambda C, tile: arith.exact_add(lane(C, 8, 7), lane(tile, 8, 7), 8, 7, round="rne", grid="ieee"),
     )

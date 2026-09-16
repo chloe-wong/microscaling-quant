@@ -42,6 +42,8 @@ def min_normal(e: int) -> float:
 def quantize(z: torch.Tensor, e: int, m: int, round: str = "ties_away", grid: str = "qtorch") -> torch.Tensor:
     if round not in rounding.MODES:
         raise ValueError(f"round must be one of {rounding.MODES}, got {round!r}")
+    if (e, m) == (8, 23):                                   # float32 itself: nothing to round, on any grid
+        return z.detach().to(torch.float32).clone()
     if not (1 <= e <= 8 and 1 <= m <= 22):
         raise ValueError(f"unsupported widths e={e}, m={m}")
     if grid == "qtorch":

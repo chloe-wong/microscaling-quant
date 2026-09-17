@@ -36,8 +36,8 @@ One name for the whole thing, activation quantizer + weight quantizer + reducer:
 
 ```python
 from mxq import scheme
-Y = scheme.mxgemmini().matmul(x.t(), W.t())            # bit-identical to MX-Gemmini
-Y = scheme.mxquant(prod=(4, 3)).matmul(x.t(), W.t())   # MXQuant's simulation
+Y = scheme.MXGEMMINI().matmul(x.t(), W.t())            # bit-identical to MX-Gemmini
+Y = scheme.MXQUANT(prod=(4, 3)).matmul(x.t(), W.t())   # MXQuant's simulation
 ```
 
 Or the pieces, a matmul the way the PE column does it:
@@ -72,11 +72,11 @@ mxq/
   rounding/          ties_away | rne | truncate, on float32 bit patterns (round_bits) or integers (round_int)
   matmul/            Y = Aᵀ·B from codes and scales
     arithmetic.py    Arithmetic(product, acc_add, tile_add): MXQUANT(prod_e, prod_m) = MXQuant's simulation, MXGEMMINI() = the hardware
-    systolic.py      the PE column (window deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate; HW_FINAL
-    fp64_accum.py    same inputs, no rounding anywhere: the reducer's error floor
+    _systolic.py     the PE column (window deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate; HW_FINAL
+    _fp64_accum.py   same inputs, no rounding anywhere: the reducer's error floor
     _common.py       operand shape and device checks, schedule length check, per-block scale map
-  schedule.py        one float(e, m) per accumulator position: load(csv, n), fixed(e, m, n); exactly n entries or ValueError
-  scheme.py          Scheme(act, weight, reduce) = one name for a layer's quantization and matmul: mxquant | mxgemmini | ocp_fp64 | passthrough
+  schedule.py        one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows); exactly rows entries or ValueError
+  scheme.py          Scheme(act, weight, reduce) = one name for a layer's quantization and matmul: MXQUANT | MXGEMMINI | OCP_FP64 | PASSTHROUGH
   arith.py           exact_add (exact sum, one rounding), saturate_product: the operations between quantizations
   _blocks.py         split along an axis into 32-blocks, pad, reassemble
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
@@ -99,7 +99,7 @@ replaces, on CPU and CUDA.
 | `block_mxgemmini` | MXQuant `quantize_mx_block32` (round nearest); operands of npu-exploration `rtl_exact` saved hardware test case |
 | `matmul.systolic` + `MXQUANT` | MXQuant `MXLinearSim._simulate_atw`, bit-identical, 3 schedules × 3 product formats |
 | `matmul.systolic` + `MXGEMMINI` | hardware output `Y_hw` of the `rtl_exact` test case (TinyLlama MLP), 65536/65536 identical |
-| `scheme.mxgemmini` | the same `Y_hw` check end to end; other factories equal their explicit quantizer + reducer calls |
+| `scheme.MXGEMMINI` | the same `Y_hw` check end to end; other factories equal their explicit quantizer + reducer calls |
 | `block_ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
 | `ocp/` | upstream microxcaling clone, AST-verbatim and numeric |
 | `rounding` | qtorch (ties away), torch bf16 and gemmini golden `_rne_e8` (RNE), golden `mx_product_quantize_trunc` (truncate) |

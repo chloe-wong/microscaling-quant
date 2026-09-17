@@ -16,13 +16,15 @@ def check_operands(P_A, X_A, P_B, X_B, block_size: int) -> Tuple[int, int, int]:
         raise ValueError(f"scales must be {nb}×{M} and {nb}×{N} for block size {block_size}, got {tuple(X_A.shape)} and {tuple(X_B.shape)}")
     if len({t.device for t in (P_A, X_A, P_B, X_B)}) != 1:
         raise ValueError("codes and scales must be on one device")
+    if any(t.dtype != torch.float32 for t in (P_A, X_A, P_B, X_B)):
+        raise ValueError("codes and scales must be float32")
     return K, M, N
 
 
-def check_schedule(schedule: Sequence[Tuple[int, int]], n: int) -> None:
-    """A schedule is fully defined when it has exactly one (e, m) per accumulator position."""
-    if len(schedule) != n:
-        raise ValueError(f"schedule has {len(schedule)} entries, reducer has {n} accumulator positions")
+def check_schedule(schedule: Sequence[Tuple[int, int]], rows: int) -> None:
+    """A schedule is fully defined when it has exactly one (e, m) row per accumulator position."""
+    if len(schedule) != rows:
+        raise ValueError(f"schedule has {len(schedule)} rows, reducer has {rows} accumulator positions")
 
 
 def scale_map(X_A: torch.Tensor, X_B: torch.Tensor, g: int) -> torch.Tensor:

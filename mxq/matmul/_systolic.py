@@ -44,4 +44,4 @@ def systolic(P_A: torch.Tensor, X_A: torch.Tensor, P_B: torch.Tensor, X_B: torch
                 e, m = schedule[k % window]
                 S = arith.acc_add(S, p, e, m)
             C = arith.tile_add(C, S * scales)
-    return C
+    return C.to(torch.float32)

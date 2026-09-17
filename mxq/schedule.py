@@ -11,9 +11,7 @@ import csv
 from pathlib import Path
 from typing import List, Tuple, Union
 
-from .matmul.systolic import HW_FINAL  # kept here for callers that read the tapeout schedule from this module
-
-__all__ = ["load", "fixed", "HW_FINAL"]
+__all__ = ["load", "fixed"]
 
 Entry = Tuple[int, int]
 

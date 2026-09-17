@@ -74,6 +74,7 @@ mxq/
     arithmetic.py    Arithmetic(product, acc_add, tile_add): MXQUANT(prod_e, prod_m) = MXQuant's simulation, MXGEMMINI() = the hardware
     systolic.py      the PE column (window deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate; HW_FINAL
     fp64_accum.py    same inputs, no rounding anywhere: the reducer's error floor
+    _common.py       operand shape and device checks, schedule length check, per-block scale map
   schedule.py        one float(e, m) per accumulator position: load(csv, n), fixed(e, m, n); exactly n entries or ValueError
   scheme.py          Scheme(act, weight, reduce) = one name for a layer's quantization and matmul: mxquant | mxgemmini | ocp_fp64 | passthrough
   arith.py           exact_add (exact sum, one rounding), saturate_product: the operations between quantizations
@@ -101,6 +102,11 @@ replaces, on CPU and CUDA.
 | `scheme.mxgemmini` | the same `Y_hw` check end to end; other factories equal their explicit quantizer + reducer calls |
 | `block_ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
 | `ocp/` | upstream microxcaling clone, AST-verbatim and numeric |
+| `rounding` | qtorch (ties away), torch bf16 and gemmini golden `_rne_e8` (RNE), golden `mx_product_quantize_trunc` (truncate) |
+| `scale_factor` | MXQuant `mx_block32_quantize` scales; Microsoft `_quantize_mx` shared exponents |
+| `element_quant.formats` | microxcaling `ElemFormat` table |
+| `arith` | gemmini golden `fp_add_exact`, `bf16_accum_add`, `mx_product_saturate` |
+| `schedule` | MXQuant `load_schedule` on both CSV layouts and 400 real files |
 
 Running them needs `qtorch`, an MXQuant checkout (`MXQUANT_ROOT`) and an upstream microxcaling clone
 (`MICROXCALING_UPSTREAM`); defaults point at the firesim2 paths.

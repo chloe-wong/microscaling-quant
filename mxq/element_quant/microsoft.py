@@ -1,8 +1,7 @@
 """Element quantization with Microsoft's microxcaling `_quantize_elemwise` (verbatim code in
-mxq/ocp/elemwise.py). This is the element step of the OCP reference block algorithm.
-
-Defaults are the flags `_quantize_mx` passes: saturate out-of-range normals to max_norm,
-keep subnormals. `round` is "nearest" (ties away), "even" (RNE) or "floor".
+mxq/ocp/elemwise.py). This is the element step of the OCP reference block algorithm, with the flags
+`_quantize_mx` passes: saturate out-of-range normals to max_norm, keep subnormals.
+`round` is "nearest" (ties away), "even" (RNE) or "floor". Reference only; block_ocp is its one caller.
 """
 from typing import Union
 
@@ -15,10 +14,6 @@ from .formats import Format, get
 __all__ = ["quantize"]
 
 
-def quantize(z: torch.Tensor, fmt: Union[str, Format], round: str = "even",
-             saturate_normals: bool = True, allow_denorm: bool = True) -> torch.Tensor:
-    f = get(fmt)
-    if f is None:
-        return z
-    return _quantize_elemwise(z, ElemFormat.from_str(f.ocp), round=round,
-                              saturate_normals=saturate_normals, allow_denorm=allow_denorm)
+def quantize(z: torch.Tensor, fmt: Union[str, Format], round: str = "even") -> torch.Tensor:
+    return _quantize_elemwise(z, ElemFormat.from_str(get(fmt).ocp), round=round,
+                              saturate_normals=True, allow_denorm=True)

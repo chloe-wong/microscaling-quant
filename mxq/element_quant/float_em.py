@@ -21,47 +21,37 @@ Input is cast to float32 unless it is float64, in which case the ieee grid round
 import torch
 
 from .. import rounding
+from .formats import FORMATS
 
-__all__ = ["quantize", "max_value", "min_normal", "GRIDS"]
+__all__ = ["quantize", "bias", "GRIDS"]
 
 GRIDS = ("qtorch", "ieee", "ocp")
-_U32 = 0xFFFFFFFF
 
 
-def max_value(e: int, m: int) -> float:
-    """Largest finite value under grid="qtorch" (top exponent reserved)."""
-    L = (1 << (e - 1)) - 1
-    return (2.0 - 2.0 ** -m) * 2.0 ** L
-
-
-def min_normal(e: int) -> float:
-    """Smallest value with full mantissa under grid="qtorch"."""
-    return 2.0 ** -((1 << (e - 1)) - 1)
+def bias(e: int) -> int:
+    """Exponent bias of a float with e exponent bits: 2^(e-1) - 1."""
+    return (1 << (e - 1)) - 1
 
 
 def quantize(z: torch.Tensor, e: int, m: int, round: str = "ties_away", grid: str = "qtorch") -> torch.Tensor:
     if round not in rounding.MODES:
         raise ValueError(f"round must be one of {rounding.MODES}, got {round!r}")
+    if grid not in GRIDS:
+        raise ValueError(f"grid must be one of {GRIDS}, got {grid!r}")
     if (e, m) == (8, 23):                                   # float32 itself: nothing to round, on any grid
         return z.detach().to(torch.float32).clone()
     if not (1 <= e <= 8 and 1 <= m <= 22):
         raise ValueError(f"unsupported widths e={e}, m={m}")
-    if grid == "qtorch":
-        return _qtorch(z, e, m, round)
-    if grid == "ieee":
-        return _ieee(z, e, m, round)
-    if grid == "ocp":
-        return _ocp(z, e, m, round)
-    raise ValueError(f"grid must be one of {GRIDS}, got {grid!r}")
+    return {"qtorch": _qtorch, "ieee": _ieee, "ocp": _ocp}[grid](z, e, m, round)
 
 
 def _qtorch(z, e, m, round):
     """qtorch's float_kernel: round the float32 bit pattern at m fraction bits, then clip_exponent."""
     z32 = z.detach().to(torch.float32).contiguous()
-    bits = z32.view(torch.int32).to(torch.int64) & _U32
+    bits = z32.view(torch.int32).to(torch.int64) & rounding.U32
     q = rounding.round_bits(bits, m, round)
 
-    L = (1 << (e - 1)) - 1
+    L = bias(e)
     min_store, max_store = 127 - L, 127 + L
     exp_store = (q >> 23) & 0xFF
     sign = bits & 0x80000000
@@ -84,8 +74,8 @@ def _ieee(z, e, m, round):
     overflow test on the value itself."""
     x = z.detach()
     x = x if x.dtype == torch.float64 else x.to(torch.float32)
-    bias = (1 << (e - 1)) - 1
-    emin, emax = 1 - bias, bias
+    b = bias(e)
+    emin, emax = 1 - b, b
 
     ax = x.abs()
     finite_nz = torch.isfinite(x) & (ax != 0)
@@ -106,13 +96,12 @@ def _ocp(z, e, m, round):
     """OCP element grid: ieee's emin and subnormal step, emax/max_norm from the format table, saturate.
     Zero-sign follows microxcaling: an exact +-0 input becomes +0.0; a negative value that rounds to zero
     becomes -0.0. Inf and NaN pass through."""
-    from .formats import FORMATS
     f = next((f for f in FORMATS.values() if (f.e, f.m) == (e, m)), None)
     if f is None:
         raise ValueError(f"grid='ocp' is defined only for the OCP element formats, not (e={e}, m={m})")
     x = z.detach()
     x = x if x.dtype == torch.float64 else x.to(torch.float32)
-    emin = 1 - ((1 << (e - 1)) - 1)
+    emin = 1 - bias(e)
 
     ax = x.abs()
     finite_nz = torch.isfinite(x) & (ax != 0)

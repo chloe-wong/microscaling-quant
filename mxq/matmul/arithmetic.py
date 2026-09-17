@@ -4,14 +4,14 @@
     acc_add(S, p, e, m)    add product p into running sum S held in an accumulator of format float(e, m)
     tile_add(C, tile)      add a finished, rescaled 32-block sum into the output C
 
-Each preset is built only from existing mxq calls; nothing here does its own rounding.
+Each preset is built only from named mxq calls (float_em, rounding, arith); no rounding is written here.
 """
 from dataclasses import dataclass
 from typing import Callable
 
 import torch
 
-from .. import arith
+from .. import arith, rounding
 from ..element_quant import float_em
 
 __all__ = ["Arithmetic", "MXQUANT", "MXGEMMINI"]
@@ -52,13 +52,14 @@ def MXGEMMINI(prod_e: int = 4, prod_m: int = 3) -> Arithmetic:
         ax = x.abs()
         nz = torch.isfinite(x) & (ax != 0)
         mant, ex = torch.frexp(torch.where(nz, ax, torch.ones_like(ax)))         # ax = mant * 2^ex, mant in [0.5, 1)
-        frac = torch.floor((2 * mant - 1) * (1 << prod_m)) / (1 << prod_m)      # truncate to prod_m fraction bits
-        t = torch.where(nz, torch.copysign(torch.ldexp(1 + frac, ex - 1), x), x)  # zeros, Inf, NaN pass through
+        k = rounding.round_int(mant * (1 << (prod_m + 1)), "truncate")            # significand with prod_m fraction bits, exact
+        t = torch.ldexp(k / (1 << prod_m), ex - 1)                                # back to the value; no exponent clamp
+        t = torch.where(nz, torch.copysign(t, x), x)                              # zeros, Inf, NaN pass through
         return arith.saturate_product(t, prod_e, prod_m)
 
     return Arithmetic(
         name=f"mxgemmini(prod=e{prod_e}m{prod_m})",
         product=product,
-        acc_add=lambda S, p, e, m: arith.exact_add(lane(S, e, m), lane(p, e, m), e, m, round="rne", grid="ieee"),
-        tile_add=lambda C, tile: arith.exact_add(lane(C, 8, 7), lane(tile, 8, 7), 8, 7, round="rne", grid="ieee"),
+        acc_add=lambda S, p, e, m: arith.exact_add(lane(S, e, m), lane(p, e, m), e, m),
+        tile_add=lambda C, tile: arith.exact_add(lane(C, 8, 7), lane(tile, 8, 7), 8, 7),
     )

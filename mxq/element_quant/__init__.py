@@ -7,6 +7,5 @@
 float_em is also the quantizer for products and accumulators, which are float(e, m) too.
 """
 from . import formats, float_em, microsoft
-from .formats import FORMATS, Format, get
 
-__all__ = ["formats", "float_em", "microsoft", "FORMATS", "Format", "get"]
+__all__ = ["formats", "float_em", "microsoft"]

@@ -12,7 +12,7 @@ The two differ in the formula for step 1 and the function used for step 2.
 | **step 1: scale factor** | `2 ^ floor(log2 amax)` | `2 ^ (floor(log2 amax) - emax)`; shared exponent clamped below at -127, NaN above 127 (E8M0 range) |
 | emax | not used | e4m3: 8, e5m2: 15, e3m2: 4, e2m3: 2, e2m1: 2 |
 | block max lands in | [1, 2) (float32 `log2` can round up at a binade edge, giving 1 - 2^-24) | top binade of the format; saturates to max_norm (448 / 57344 / 28 / 7.5 / 6) |
-| codes actually used | only those <= 2 for finite inputs (fp4: 0, 0.5, 1, 1.5, 2) | whole format |
+| codes actually used | only those <= 2 for finite inputs (fp4: 0, 0.5, 0.75, 1, 1.5, 2) | whole format |
 | headroom above block max | ~7 binades (e4m3: codes reach 240) | none |
 | zero block | scale clamped to 1e-38 | shared exponent clamped |
 | **step 2: element quantization** | qtorch `float_quantize(z, exp=e, man=m, rounding="nearest")` | Microsoft `_quantize_elemwise(z, fmt, round, saturate_normals=True, allow_denorm=True)` |
@@ -41,9 +41,11 @@ qtorch's own lowest binade [2^-L, 2^-L+1) sits one below OCP's min-normal, and i
 differ for 0.4 / 6.8 / 16.1 / 16.1 % of values. The narrow formats are hit hardest because their
 minimum normal is 1.0 and the [1, 2) scale placement puts most elements below it.
 
-## Relation to the RTL
+## The third composition: block_mxgemmini
 
-The old RTL requantizer used the OCP scale factor (block max at 448). The mesh accumulates at
-exponent width 4, so chaining one tile's output into the next overflowed to NaN. The requantizer
-rework (gemmini 0b2cc2c) switched the RTL to the MXQuant scale factor (block max in [1, 2)).
-`block_mxquant` carries the scale rule the hardware uses today; its element codes are not the hardware's (see FIX.md F4).
+`mxq.block_mxgemmini` takes the MXQuant scale rule (column 1 above) and the OCP element grid (column 2's
+element quantization, implemented in `float_em` with `grid="ocp"`, rounding ties away). Those are the operand
+codes the MX-Gemmini hardware consumes: its requantizer adopted the MXQuant scale rule (gemmini 0b2cc2c,
+`log2_pmax = 0`) after the OCP placement overflowed the 4-bit-exponent accumulators when one tile's output
+fed the next. `block_mxquant` and `block_mxgemmini` therefore differ only in the subnormal handling measured
+above; the differences never exceed the OCP minimum normal.

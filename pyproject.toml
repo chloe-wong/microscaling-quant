@@ -7,7 +7,7 @@ name = "microscaling-quant"
 version = "0.0.1"
 description = "Granular microscaling (MX) quantization ops. mxq."
 requires-python = ">=3.10"
-dependencies = ["torch", "numpy"]
+dependencies = ["torch"]
 
 [tool.setuptools.packages.find]
 include = ["mxq*"]

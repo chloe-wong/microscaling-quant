@@ -27,7 +27,7 @@ def saturate_product(x: torch.Tensor, e: int, m: int) -> torch.Tensor:
     exponent bias + 1. For e4m3 that is 448, the format max. Values below max_normal pass through unchanged.
     """
     x = x.to(torch.float32)
-    bias = (1 << (e - 1)) - 1
+    bias = float_em.bias(e)
     is_mx_fp8 = (e == 4 and m == 3)
     emax = bias + 1 if is_mx_fp8 else bias
     scale = float(2 ** m)

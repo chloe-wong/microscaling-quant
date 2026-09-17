@@ -5,15 +5,15 @@ from typing import Sequence, Tuple
 import torch
 
 
-def check_operands(P_A, X_A, P_B, X_B, block: int) -> Tuple[int, int, int]:
-    """A: K×M with X_A: ceil(K/block)×M; B: K×N with X_B: ceil(K/block)×N; all on one device. Returns (K, M, N)."""
+def check_operands(P_A, X_A, P_B, X_B, block_size: int) -> Tuple[int, int, int]:
+    """A: K×M with X_A: ceil(K/block_size)×M; B: K×N with X_B: ceil(K/block_size)×N; one device. Returns (K, M, N)."""
     K, M = P_A.shape
     K_b, N = P_B.shape
     if K != K_b:
         raise ValueError(f"A is {K}×{M}, B is {K_b}×{N}: contraction lengths differ")
-    nb = math.ceil(K / block)
+    nb = math.ceil(K / block_size)
     if tuple(X_A.shape) != (nb, M) or tuple(X_B.shape) != (nb, N):
-        raise ValueError(f"scales must be {nb}×{M} and {nb}×{N} for block {block}, got {tuple(X_A.shape)} and {tuple(X_B.shape)}")
+        raise ValueError(f"scales must be {nb}×{M} and {nb}×{N} for block size {block_size}, got {tuple(X_A.shape)} and {tuple(X_B.shape)}")
     if len({t.device for t in (P_A, X_A, P_B, X_B)}) != 1:
         raise ValueError("codes and scales must be on one device")
     return K, M, N

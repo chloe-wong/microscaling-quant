@@ -6,8 +6,8 @@ power-of-two scale of the same shape and dtype.
     mxquant(amax)      X = 2^floor(log2 amax)             block max lands in [1, 2)
     ocp(amax, emax)    X = 2^(floor(log2 amax) - emax)    block max lands in the format's top binade
 
-mxquant is the rule used by MXQuant's linear-layer simulation and by the current RTL
-requantizer. ocp is the OCP Microscaling v1.0 rule as implemented in Microsoft's
+mxquant is the rule used by MXQuant's linear-layer simulation and by the MX-Gemmini RTL and
+spike (gemmini 0b2cc2c and later: log2_pmax = 0). ocp is the OCP Microscaling v1.0 rule as implemented in Microsoft's
 microxcaling `_quantize_mx` (see mxq/ocp/blockwise.py), including its E8M0 range handling.
 """
 import torch

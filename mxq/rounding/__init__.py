@@ -22,13 +22,13 @@ from . import ties_away, rne, truncate
 
 MODES = ("ties_away", "rne", "truncate")
 _MOD = {"ties_away": ties_away, "rne": rne, "truncate": truncate}
-_U32 = 0xFFFFFFFF
+U32 = 0xFFFFFFFF   #: mask that keeps a float32 bit pattern inside 32 bits after int64 arithmetic
 
-__all__ = ["MODES", "round_bits", "round_int", "ties_away", "rne", "truncate"]
+__all__ = ["MODES", "U32", "round_bits", "round_int", "ties_away", "rne", "truncate"]
 
 
 def _drop(bits: torch.Tensor, keep: Union[int, torch.Tensor]):
-    """(mask of dropped bits, half ulp) for `keep` fraction bits, both broadcast to `bits`."""
+    """(number of dropped bits, mask of dropped bits, half ulp) for `keep` fraction bits, broadcast to `bits`."""
     keep = torch.as_tensor(keep, dtype=torch.int64, device=bits.device)
     if bool((keep < 0).any()) or bool((keep > 22).any()):
         raise ValueError("keep must be in [0, 22] (23 = identity is not a rounding)")
@@ -43,7 +43,7 @@ def round_bits(bits: torch.Tensor, keep: Union[int, torch.Tensor], mode: str) ->
     if mode not in _MOD:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
     drop, mask, half = _drop(bits, keep)
-    return _MOD[mode].bits(bits, drop, mask, half) & _U32
+    return _MOD[mode].bits(bits, drop, mask, half) & U32
 
 
 def round_int(k: torch.Tensor, mode: str) -> torch.Tensor:

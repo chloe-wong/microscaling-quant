@@ -1,7 +1,7 @@
 """The three rounding points inside a reducer, as one object.
 
     product(a, b)          multiply two codes, round to the product format
-    lane_add(S, p, e, m)   add product p into running sum S held in a lane of format float(e, m)
+    acc_add(S, p, e, m)    add product p into running sum S held in an accumulator of format float(e, m)
     tile_add(C, tile)      add a finished, rescaled 32-block sum into the output C
 
 Each preset is built only from existing mxq calls; nothing here does its own rounding.
@@ -23,7 +23,7 @@ Tensor = torch.Tensor
 class Arithmetic:
     name: str
     product: Callable[[Tensor, Tensor], Tensor]
-    lane_add: Callable[[Tensor, Tensor, int, int], Tensor]
+    acc_add: Callable[[Tensor, Tensor, int, int], Tensor]
     tile_add: Callable[[Tensor, Tensor], Tensor]
 
 
@@ -35,7 +35,7 @@ def MXQUANT(prod_e: int, prod_m: int) -> Arithmetic:
     return Arithmetic(
         name=f"mxquant(prod=e{prod_e}m{prod_m})",
         product=lambda a, b: q(a * b, prod_e, prod_m),
-        lane_add=lambda S, p, e, m: q(S + p, e, m),
+        acc_add=lambda S, p, e, m: q(S + p, e, m),
         tile_add=lambda C, tile: C + tile,
     )
 
@@ -59,6 +59,6 @@ def MXGEMMINI(prod_e: int = 4, prod_m: int = 3) -> Arithmetic:
     return Arithmetic(
         name=f"mxgemmini(prod=e{prod_e}m{prod_m})",
         product=product,
-        lane_add=lambda S, p, e, m: arith.exact_add(lane(S, e, m), lane(p, e, m), e, m, round="rne", grid="ieee"),
+        acc_add=lambda S, p, e, m: arith.exact_add(lane(S, e, m), lane(p, e, m), e, m, round="rne", grid="ieee"),
         tile_add=lambda C, tile: arith.exact_add(lane(C, 8, 7), lane(tile, 8, 7), 8, 7, round="rne", grid="ieee"),
     )

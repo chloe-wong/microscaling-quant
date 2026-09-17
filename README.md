@@ -38,8 +38,8 @@ A matmul the way the PE column does it:
 from mxq import block_mxgemmini, matmul, schedule
 P_A, X_A = block_mxgemmini.quantize(x.t(), "MXFP8_E4M3", axis=0)      # A = xᵀ, K×M
 P_B, X_B = block_mxgemmini.quantize(W.t(), "MXFP8_E4M3", axis=0)      # B = Wᵀ, K×N
-Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), schedule.HW_FINAL)   # M×N, bit-identical to MX-Gemmini
-Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXQUANT(4, 3), schedule.HW_FINAL)  # MXQuant's simulation
+Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), matmul.HW_FINAL)   # M×N, bit-identical to MX-Gemmini
+Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXQUANT(4, 3), matmul.HW_FINAL)  # MXQuant's simulation
 ```
 
 Product / accumulator quantization to any float(e, m):
@@ -63,10 +63,10 @@ mxq/
   ocp/               Microsoft microxcaling code, verbatim (MIT). Oracle only; see ocp/UPSTREAM.md
   rounding/          ties_away | rne | truncate, on float32 bit patterns (round_bits) or integers (round_int)
   matmul/            Y = Aᵀ·B from codes and scales
-    arithmetic.py    Arithmetic(product, lane_add, tile_add): MXQUANT(prod_e, prod_m) = MXQuant's simulation, MXGEMMINI() = the hardware
-    systolic.py      the 16-deep PE column: per-k product, per-lane accumulate, per-32-block rescale and accumulate
+    arithmetic.py    Arithmetic(product, acc_add, tile_add): MXQUANT(prod_e, prod_m) = MXQuant's simulation, MXGEMMINI() = the hardware
+    systolic.py      the PE column (window deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate; HW_FINAL
     fp64_accum.py    same inputs, no rounding anywhere: the reducer's error floor
-  schedule.py        per-lane accumulator formats: load(csv), fixed(e, m), HW_FINAL (the tapeout schedule)
+  schedule.py        one float(e, m) per accumulator position: load(csv, n), fixed(e, m, n); exactly n entries or ValueError
   arith.py           exact_add (exact sum, one rounding), saturate_product: the operations between quantizations
   _blocks.py         split along an axis into 32-blocks, pad, reassemble
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured

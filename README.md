@@ -32,7 +32,15 @@ V_hat = block_mxquant.dequantize(P, X, axis=0)             # == P * expand(X)
 `P` has `V`'s shape. `X` has `V`'s shape with the block axis of length ceil(len/32) (last block zero-padded).
 Formats: `MXFP8_E4M3`, `MXFP8_E5M2`, `MXFP6_E3M2`, `MXFP6_E2M3`, `MXFP4`, `FP32` (pass-through).
 
-A matmul the way the PE column does it:
+One name for the whole thing, activation quantizer + weight quantizer + reducer:
+
+```python
+from mxq import scheme
+Y = scheme.mxgemmini().matmul(x.t(), W.t())            # bit-identical to MX-Gemmini
+Y = scheme.mxquant(prod=(4, 3)).matmul(x.t(), W.t())   # MXQuant's simulation
+```
+
+Or the pieces, a matmul the way the PE column does it:
 
 ```python
 from mxq import block_mxgemmini, matmul, schedule
@@ -67,6 +75,7 @@ mxq/
     systolic.py      the PE column (window deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate; HW_FINAL
     fp64_accum.py    same inputs, no rounding anywhere: the reducer's error floor
   schedule.py        one float(e, m) per accumulator position: load(csv, n), fixed(e, m, n); exactly n entries or ValueError
+  scheme.py          Scheme(act, weight, reduce) = one name for a layer's quantization and matmul: mxquant | mxgemmini | ocp_fp64 | passthrough
   arith.py           exact_add (exact sum, one rounding), saturate_product: the operations between quantizations
   _blocks.py         split along an axis into 32-blocks, pad, reassemble
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
@@ -89,6 +98,7 @@ replaces, on CPU and CUDA.
 | `block_mxgemmini` | MXQuant `quantize_mx_block32` (round nearest); operands of npu-exploration `rtl_exact` saved hardware test case |
 | `matmul.systolic` + `MXQUANT` | MXQuant `MXLinearSim._simulate_atw`, bit-identical, 3 schedules × 3 product formats |
 | `matmul.systolic` + `MXGEMMINI` | hardware output `Y_hw` of the `rtl_exact` test case (TinyLlama MLP), 65536/65536 identical |
+| `scheme.mxgemmini` | the same `Y_hw` check end to end; other factories equal their explicit quantizer + reducer calls |
 | `block_ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
 | `ocp/` | upstream microxcaling clone, AST-verbatim and numeric |
 

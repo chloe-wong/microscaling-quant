@@ -14,11 +14,12 @@ compositions are provided.
     rounding          ties_away | rne | truncate, on float32 bit patterns or integers; shared by every quantizer
     matmul            reducers Y = Aᵀ·B from codes and scales: Arithmetic (MXQUANT | MXGEMMINI), systolic, fp64_accum
     schedule          one float(e, m) per accumulator position: load(csv, n), fixed(e, m, n)
+    scheme            Scheme(act, weight, reduce): one name for a layer's quantization and matmul; mxquant | mxgemmini | ocp_fp64 | passthrough
     arith             exact_add (add exactly, round once) and saturate_product: what a PE does between quantizations
 
 Every block quantizer has the same interface:  P, X = quantize(V, fmt, axis)   V_hat = P * expand(X)
 """
-from . import ocp, rounding, arith, schedule, scale_factor, element_quant, block_ocp, block_mxquant, block_mxgemmini, matmul
+from . import ocp, rounding, arith, schedule, scale_factor, element_quant, block_ocp, block_mxquant, block_mxgemmini, matmul, scheme
 
 __all__ = ["ocp", "rounding", "arith", "schedule", "scale_factor", "element_quant", "block_ocp", "block_mxquant",
-           "block_mxgemmini", "matmul"]
+           "block_mxgemmini", "matmul", "scheme"]

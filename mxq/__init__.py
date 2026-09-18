@@ -12,7 +12,7 @@ compositions are provided.
     block_mxgemmini   MX-Gemmini operands    = scale_factor.mxquant + float_em grid=ocp
     ocp               Microsoft microxcaling, verbatim: the oracle block_ocp is validated against
     rounding          ties_away | rne | truncate, on float32 bit patterns or integers; shared by every quantizer
-    matmul            reducers Y = Aᵀ·B from codes and scales: Arithmetic (MXQUANT | MXGEMMINI), systolic, fp64_accum
+    matmul            reducers Y = Aᵀ·B from codes and scales: Arithmetic (MXQUANT | MXGEMMINI), systolic, ipt, fp64_accum
     schedule          one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows)
     scheme            Scheme(act, weight, reduce): one name for a layer's quantization and matmul; MXQUANT | MXGEMMINI | OCP_FP64 | PASSTHROUGH
     arith             exact_add (add exactly, round once) and saturate_product: what a PE does between quantizations

@@ -73,6 +73,7 @@ mxq/
   matmul/            Y = Aᵀ·B from codes and scales
     arithmetic.py    Arithmetic(product, acc_add, tile_add): MXQUANT(prod_e, prod_m) = MXQuant's simulation, MXGEMMINI() = the hardware
     _systolic.py     the PE column (window deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate; HW_FINAL
+    _ipt.py          the inner-product tree: fanin (16) products at once, log2(fanin) adder levels each with its own format, per-block rescale and accumulate
     _fp64_accum.py   same inputs, no rounding anywhere: the reducer's error floor
     _common.py       operand shape and device checks, schedule length check, per-block scale map
   schedule.py        one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows); exactly rows entries or ValueError
@@ -99,6 +100,7 @@ replaces, on CPU and CUDA.
 | `block_mxgemmini` | MXQuant `quantize_mx_block32` (round nearest); operands of npu-exploration `rtl_exact` saved hardware test case |
 | `matmul.systolic` + `MXQUANT` | MXQuant `MXLinearSim._simulate_atw`, bit-identical, 3 schedules × 3 product formats |
 | `matmul.systolic` + `MXGEMMINI` | hardware output `Y_hw` of the `rtl_exact` test case (TinyLlama MLP), 65536/65536 identical |
+| `matmul.ipt` | scalar per-element tree in plain Python, bit-identical, fanin 2 to 32 with K tails; `fp64_accum` without rounding |
 | `scheme.MXGEMMINI` | the same `Y_hw` check end to end; other factories equal their explicit quantizer + reducer calls |
 | `block_ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
 | `ocp/` | upstream microxcaling clone, AST-verbatim and numeric |

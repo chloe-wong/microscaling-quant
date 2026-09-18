@@ -1,7 +1,7 @@
 """Element format table shared by every block quantizer.
 
 One row per OCP MX element format. `e`/`m` are the exponent and mantissa widths used by
-float_em; `emax` and `max_norm` are the OCP spec values; `ocp` is the mxq.ocp ElemFormat name.
+float_em; `emax` and `max_norm` are the OCP spec values; `ocp` is the mxq.microxcaling ElemFormat name.
 "FP32" means no quantization (pass-through) and maps to None.
 """
 from dataclasses import dataclass

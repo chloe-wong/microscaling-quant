@@ -1,5 +1,8 @@
 # Provenance
 
+This directory was `mxq/ocp/` until 2026-09-18; renamed so that `ocp` in mxq always means the spec and
+`microxcaling` means Microsoft's code.
+
 Source: https://github.com/microsoft/microxcaling
 Commit: 7bc41952de394f5cc5e782baf132e7c7542eb4e4 (2024-08-19)
 License: MIT (see LICENSE, copied verbatim)

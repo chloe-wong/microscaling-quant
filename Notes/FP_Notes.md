@@ -21,7 +21,7 @@ The two differ in the formula for step 1 and the function used for step 2.
 | subnormals | one binade below min-normal keeps mantissa bits, then flush to 0 | true fixed-step subnormals down to 2^(emin - m) |
 | rounding | nearest, ties away from zero | "even" (RNE) default; "nearest" and "floor" available |
 | **output** | codes `P` and scales `X` separately | dequantized `P * X` only |
-| **where in mxq** | `mxq.block_mxquant.quantize(V, fmt, axis)` | `mxq.block_ocp.quantize(V, fmt, axis)`; reference impl in `mxq.ocp.block_quantize` |
+| **where in mxq** | `mxq.block.mxquant.quantize(V, fmt, axis)` | `mxq.block.ocp.quantize(V, fmt, axis)`; reference impl in `mxq.microxcaling.block_quantize` |
 
 ## Measured differences (firesim2, 2026-09-15)
 
@@ -41,11 +41,11 @@ qtorch's own lowest binade [2^-L, 2^-L+1) sits one below OCP's min-normal, and i
 differ for 0.4 / 6.8 / 16.1 / 16.1 % of values. The narrow formats are hit hardest because their
 minimum normal is 1.0 and the [1, 2) scale placement puts most elements below it.
 
-## The third composition: block_mxgemmini
+## The third composition: block.mxgemmini
 
-`mxq.block_mxgemmini` takes the MXQuant scale rule (column 1 above) and the OCP element grid (column 2's
+`mxq.block.mxgemmini` takes the MXQuant scale rule (column 1 above) and the OCP element grid (column 2's
 element quantization, implemented in `float_em` with `grid="ocp"`, rounding ties away). Those are the operand
 codes the MX-Gemmini hardware consumes: its requantizer adopted the MXQuant scale rule (gemmini 0b2cc2c,
 `log2_pmax = 0`) after the OCP placement overflowed the 4-bit-exponent accumulators when one tile's output
-fed the next. `block_mxquant` and `block_mxgemmini` therefore differ only in the subnormal handling measured
+fed the next. `block.mxquant` and `block.mxgemmini` therefore differ only in the subnormal handling measured
 above; the differences never exceed the OCP minimum normal.

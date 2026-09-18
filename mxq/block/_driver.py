@@ -1,4 +1,4 @@
-"""Shared plumbing for block quantizers: split a tensor into blocks along one axis, pad, run
+"""Shared plumbing for the block quantizers in mxq.block: split a tensor into blocks along one axis, pad, run
 the two steps, and put codes / scales back into the caller's layout.
 
 Layout contract (same as MXQuant's mx_block32_quantize):

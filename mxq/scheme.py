@@ -9,8 +9,8 @@ are multiplied. There are no presets; the caller names every piece.
 
 Example, the hardware chain:
     from functools import partial
-    from mxq import Scheme, block_mxgemmini, matmul, schedule
-    q = partial(block_mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0)
+    from mxq import Scheme, block, matmul, schedule
+    q = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0)
     hw = Scheme("mxgemmini", act=q, weight=q,
                 reduce=partial(matmul.systolic, arith=matmul.MXGEMMINI(), schedule=schedule.HW_FINAL))
 """

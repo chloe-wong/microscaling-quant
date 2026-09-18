@@ -8,11 +8,11 @@ power-of-two scale of the same shape and dtype.
 
 mxquant is the rule used by MXQuant's linear-layer simulation and by the MX-Gemmini RTL and
 spike (gemmini 0b2cc2c and later: log2_pmax = 0). ocp is the OCP Microscaling v1.0 rule as implemented in Microsoft's
-microxcaling `_quantize_mx` (see mxq/ocp/blockwise.py), including its E8M0 range handling.
+microxcaling `_quantize_mx` (see mxq/microxcaling/blockwise.py), including its E8M0 range handling.
 """
 import torch
 
-from .ocp.formats import FP32_MIN_NORMAL
+from .microxcaling.formats import FP32_MIN_NORMAL
 
 __all__ = ["mxquant", "ocp"]
 
@@ -32,7 +32,7 @@ def ocp(amax: torch.Tensor, emax: int, scale_bits: int = 8) -> torch.Tensor:
 
     Zero blocks use FP32_MIN_NORMAL for the log. Shared exponents above the E8M0 range
     become NaN (overflow); below it they clamp to -(2^(scale_bits-1) - 1).
-    Numerics match mxq/ocp/blockwise.py::_quantize_mx exactly.
+    Numerics match mxq/microxcaling/blockwise.py::_quantize_mx exactly.
     """
     shared_exp = torch.floor(torch.log2(amax + FP32_MIN_NORMAL * (amax == 0).type(amax.dtype)))
     shared_exp = shared_exp - emax

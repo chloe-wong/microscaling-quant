@@ -20,13 +20,13 @@ Every block quantizer has one interface: a tensor in, codes `P` and power-of-two
 
 ```python
 import torch
-from mxq import block_mxquant, block_mxgemmini, block_ocp
+from mxq import block
 
 V = torch.randn(4096, 512)                      # e.g. A = xᵀ (K×M), blocks of 32 along K
-P, X = block_mxquant.quantize(V, "MXFP8_E4M3", axis=0)     # MXQuant simulation (qtorch 0.2.0 element grid)
-P, X = block_mxgemmini.quantize(V, "MXFP8_E4M3", axis=0)   # MX-Gemmini operand codes (OCP element grid)
-P, X = block_ocp.quantize(V, "MXFP8_E4M3", axis=0)         # OCP MX v1.0 (Microsoft reference)
-V_hat = block_mxquant.dequantize(P, X, axis=0)             # == P * expand(X)
+P, X = block.mxquant.quantize(V, "MXFP8_E4M3", axis=0)     # MXQuant simulation (qtorch 0.2.0 element grid)
+P, X = block.mxgemmini.quantize(V, "MXFP8_E4M3", axis=0)   # MX-Gemmini operand codes (OCP element grid)
+P, X = block.ocp.quantize(V, "MXFP8_E4M3", axis=0)         # OCP MX v1.0 (Microsoft reference)
+V_hat = block.mxquant.dequantize(P, X, axis=0)             # == P * expand(X)
 ```
 
 `P` has `V`'s shape. `X` has `V`'s shape with the block axis of length ceil(len/32) (last block zero-padded).
@@ -36,9 +36,9 @@ A matmul on the codes is a reducer (the order of the additions) plus an Arithmet
 plus a schedule (the accumulator format at each position). Every piece is named explicitly; there are no presets:
 
 ```python
-from mxq import block_mxgemmini, matmul, schedule
-P_A, X_A = block_mxgemmini.quantize(x.t(), "MXFP8_E4M3", axis=0)      # A = xᵀ, K×M
-P_B, X_B = block_mxgemmini.quantize(W.t(), "MXFP8_E4M3", axis=0)      # B = Wᵀ, K×N
+from mxq import block, matmul, schedule
+P_A, X_A = block.mxgemmini.quantize(x.t(), "MXFP8_E4M3", axis=0)      # A = xᵀ, K×M
+P_B, X_B = block.mxgemmini.quantize(W.t(), "MXFP8_E4M3", axis=0)      # B = Wᵀ, K×N
 Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), schedule.HW_FINAL)    # M×N, bit-identical to MX-Gemmini
 Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXQUANT(4, 3), schedule.HW_FINAL)  # MXQuant's simulation
 Y = matmul.ipt(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), [(4, 4), (4, 4), (4, 4), (8, 7)])   # adder tree, one format per level
@@ -75,10 +75,12 @@ mxq/
   element_quant/     step 2   float_em(x, e, m, rounding_mode=, grid=)  grid: qtorch (MXQuant) | ieee (accumulators) | ocp (MX operands)
                               microsoft: microxcaling _quantize_elemwise, verbatim, reference only
                               formats.py: one table of e, m, emax, max_norm per format
-  block_mxquant.py   scale_factor.mxquant + float_em grid=qtorch  -> MXQuant's simulation (all reported perplexities)
-  block_mxgemmini.py scale_factor.mxquant + float_em grid=ocp     -> MX-Gemmini operand codes
-  block_ocp.py       scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.ocp
-  ocp/               Microsoft microxcaling code, verbatim (MIT). Oracle only; see ocp/UPSTREAM.md
+  block/             step 1 + step 2 composed; one interface: P, X = quantize(V, fmt, axis), V_hat = dequantize(P, X, axis)
+    mxquant.py       scale_factor.mxquant + float_em grid=qtorch  -> MXQuant's simulation (all reported perplexities)
+    mxgemmini.py     scale_factor.mxquant + float_em grid=ocp     -> MX-Gemmini operand codes
+    ocp.py           scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.microxcaling
+    _driver.py       split along an axis into 32-blocks, pad, run the two steps, reassemble; BLOCK = 32
+  microxcaling/      Microsoft's microxcaling package, verbatim (MIT). Oracle only; see microxcaling/UPSTREAM.md
   rounding/          ties_away | rne | truncate, on float32 bit patterns (round_bits) or integers (round_int)
   arith.py           exact_add, truncate_significand, saturate_product: what a PE does between quantizations
   matmul/            Y = Aᵀ·B from codes and scales
@@ -89,18 +91,18 @@ mxq/
     _common.py       operand shape, dtype and device checks, schedule length check, per-block scale map
   schedule.py        one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL; exactly rows entries or ValueError
   scheme.py          Scheme(name, act, weight, reduce): a container for one explicit chain, .matmul(A, B); no presets
-  _blocks.py         split along an axis into 32-blocks, pad, reassemble; BLOCK = 32
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
 ```
 
-`block_mxquant` and `block_mxgemmini` share the scale rule (block max in [1, 2)) and differ only in the element
+`block.mxquant` and `block.mxgemmini` share the scale rule (block max in [1, 2)) and differ only in the element
 grid: qtorch 0.2.0's (no true subnormals, top exponent reserved) vs the OCP element formats' (subnormals kept).
-`block_ocp` differs in both steps: block max in the format's top binade (448 for E4M3), OCP element grid.
+`block.ocp` differs in both steps: block max in the format's top binade (448 for E4M3), OCP element grid.
 Details and measurements: `Notes/FP_Notes.md`.
 
-Name history: on `main` before this branch, `block_mxgemmini` was the name of what is now `block_mxquant`
-(qtorch grid). The current `block_mxgemmini` produces the hardware's operand codes (OCP grid). Code written
-against the old name must switch to `block_mxquant` to keep its numbers.
+Name history: on `main` before this branch, `block_mxgemmini` was the name of what is now `block.mxquant`
+(qtorch grid). The current `block.mxgemmini` produces the hardware's operand codes (OCP grid). Code written
+against the old name must switch to `block.mxquant` to keep its numbers. `mxq.ocp` (Microsoft's code) is now
+`mxq.microxcaling`; `ocp` in mxq always means the OCP spec.
 
 ## Validation
 
@@ -110,14 +112,14 @@ replaces, on CPU and CUDA.
 | module | oracle |
 |---|---|
 | `element_quant.float_em` | grid qtorch: `qtorch.quant.float_quantize`, 15 (e, m) pairs, 1M samples each; grid ieee: gemmini golden `fp_quantize_rne`; grid ocp: microxcaling `_quantize_elemwise` |
-| `block_mxquant` | MXQuant `mx_block32_quantize` (two copies), codes and scales |
-| `block_mxgemmini` | MXQuant `quantize_mx_block32` (round nearest); operands of npu-exploration `rtl_exact` saved hardware test case |
+| `block.mxquant` | MXQuant `mx_block32_quantize` (two copies), codes and scales |
+| `block.mxgemmini` | MXQuant `quantize_mx_block32` (round nearest); operands of npu-exploration `rtl_exact` saved hardware test case |
 | `matmul.systolic` + `MXQUANT` | MXQuant `MXLinearSim._simulate_atw`, bit-identical, 3 schedules × 3 product formats |
 | `matmul.systolic` + `MXGEMMINI` | hardware output `Y_hw` of the `rtl_exact` test case (TinyLlama MLP), 65536/65536 identical |
 | `matmul.ipt` | scalar per-element tree in plain Python, bit-identical, fanin 2 to 32 with K tails; `fp64_accum` without rounding |
 | `Scheme` | `.matmul` equals the explicit quantizer + reducer calls |
-| `block_ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
-| `ocp/` | upstream microxcaling clone, AST-verbatim and numeric |
+| `block.ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
+| `microxcaling/` | upstream microxcaling clone, AST-verbatim and numeric |
 | `rounding` | qtorch (ties away), torch bf16 and gemmini golden `_rne_e8` (RNE), golden `mx_product_quantize_trunc` (truncate) |
 | `scale_factor` | MXQuant `mx_block32_quantize` scales; Microsoft `_quantize_mx` shared exponents |
 | `element_quant.formats` | microxcaling `ElemFormat` table |

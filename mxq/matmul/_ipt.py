@@ -9,7 +9,7 @@ from typing import Sequence, Tuple
 
 import torch
 
-from .. import _blocks
+from ..block import BLOCK
 from ._common import check_operands, check_schedule, scale_map
 from ._arithmetic import Arithmetic
 
@@ -18,7 +18,7 @@ __all__ = ["ipt"]
 
 def ipt(P_A: torch.Tensor, X_A: torch.Tensor, P_B: torch.Tensor, X_B: torch.Tensor,
         arith: Arithmetic, schedule: Sequence[Tuple[int, int]], fanin: int = 16,
-        block_size: int = _blocks.BLOCK) -> torch.Tensor:
+        block_size: int = BLOCK) -> torch.Tensor:
     """Y = Aᵀ·B. A: K×M codes, X_A: ceil(K/block_size)×M scales; B: K×N, X_B: ceil(K/block_size)×N. Y: M×N float32.
 
     For each block of K: the block's scale map; for each group of `fanin` k's inside it: all products at once by

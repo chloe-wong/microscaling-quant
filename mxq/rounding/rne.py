@@ -4,7 +4,7 @@ import torch
 
 
 def bits(bits: torch.Tensor, drop, mask, half) -> torch.Tensor:
-    lsb = torch.bitwise_right_shift(bits, drop) & 1
+    lsb = (bits >> drop) & 1
     return (bits + half - 1 + lsb) & ~mask
 
 

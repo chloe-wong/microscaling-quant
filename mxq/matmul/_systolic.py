@@ -2,20 +2,22 @@
 taken from an Arithmetic. Order of operations is the hardware's; timing is not modelled.
 
 The mesh width never changes a value (each output element is its own K-sum); the column depth is `window`,
-and the schedule has one float(e, m) per lane, i.e. exactly `window` entries. HW_FINAL is the tapeout's.
+and the schedule has one float(e, m) per lane, i.e. exactly `window` entries. schedule.HW_FINAL is the tapeout's.
+
+K tail (K not a multiple of `window`): the last window's sum leaves the column after its last real product, as
+in `_simulate_atw`. Hardware pads the tail with zero products that still pass through the remaining lanes;
+with HW_FINAL every later lane holds every value of the lane before it, so the zeros change nothing and the two
+agree. A schedule with a narrower lane after a wider one would differ; there mxq follows MXQuant.
 """
-from typing import List, Sequence, Tuple
+from typing import Sequence, Tuple
 
 import torch
 
 from .. import _blocks
 from ._common import check_operands, check_schedule, scale_map
-from .arithmetic import Arithmetic
+from ._arithmetic import Arithmetic
 
-__all__ = ["systolic", "HW_FINAL"]
-
-#: MX-Gemmini tapeout lanes (schedule_hw_final.csv, rtl_exact/acc_schedule.csv): 0-7 e4m4, 8-9 e4m5, 10-14 e4m6, 15 e8m7
-HW_FINAL: List[Tuple[int, int]] = [(4, 4)] * 8 + [(4, 5)] * 2 + [(4, 6)] * 5 + [(8, 7)]
+__all__ = ["systolic"]
 
 
 def systolic(P_A: torch.Tensor, X_A: torch.Tensor, P_B: torch.Tensor, X_B: torch.Tensor,

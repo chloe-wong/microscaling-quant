@@ -7,6 +7,8 @@ import torch
 
 def check_operands(P_A, X_A, P_B, X_B, block_size: int) -> Tuple[int, int, int]:
     """A: K×M with X_A: ceil(K/block_size)×M; B: K×N with X_B: ceil(K/block_size)×N; one device. Returns (K, M, N)."""
+    if any(t.ndim != 2 for t in (P_A, X_A, P_B, X_B)):
+        raise ValueError(f"codes and scales must be 2-D, got ndim {[t.ndim for t in (P_A, X_A, P_B, X_B)]}")
     K, M = P_A.shape
     K_b, N = P_B.shape
     if K != K_b:

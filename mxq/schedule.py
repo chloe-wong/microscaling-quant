@@ -3,17 +3,21 @@
     load(path, rows=16)   -> [(e, m), ...]    CSV rows `position,e,m` or `position,B,e,m`, optional header
                                               (MXQuant complete_integration_e2e `load_schedule`, same rules)
     fixed(e, m, rows=16)  -> [(e, m)] * rows
+    HW_FINAL                                  the MX-Gemmini tapeout's 16 lanes
 
-What a position is belongs to the reducer: a PE lane for matmul.systolic (its tapeout list is matmul.HW_FINAL).
+What a position is belongs to the reducer: a PE lane for matmul.systolic, a tree level for matmul.ipt.
 A schedule is fully defined when positions 0..rows-1 are each given once and nothing else is.
 """
 import csv
 from pathlib import Path
 from typing import List, Tuple, Union
 
-__all__ = ["load", "fixed"]
+__all__ = ["load", "fixed", "HW_FINAL"]
 
 Entry = Tuple[int, int]
+
+#: MX-Gemmini tapeout lanes (schedule_hw_final.csv, rtl_exact/acc_schedule.csv): 0-7 e4m4, 8-9 e4m5, 10-14 e4m6, 15 e8m7
+HW_FINAL: List[Entry] = [(4, 4)] * 8 + [(4, 5)] * 2 + [(4, 6)] * 5 + [(8, 7)]
 
 
 def load(path: Union[str, Path], rows: int = 16) -> List[Entry]:

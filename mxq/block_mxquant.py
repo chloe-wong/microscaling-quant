@@ -15,9 +15,9 @@ from typing import Tuple, Union
 
 import torch
 
-from .. import _blocks, scale_factor
-from ..element_quant import float_em
-from ..element_quant.formats import Format, get
+from . import _blocks, scale_factor
+from .element_quant import float_em
+from .element_quant.formats import Format, get
 
 __all__ = ["quantize", "dequantize"]
 
@@ -31,4 +31,6 @@ def quantize(V: torch.Tensor, fmt: Union[str, Format], axis: int = 0,
                             elem=lambda z: float_em.quantize(z, f.e, f.m))    # step 2
 
 
-dequantize = _blocks.dequantize
+def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = _blocks.BLOCK) -> torch.Tensor:
+    """V_hat = P * expand(X): each scale repeated block_size times along `axis`, cut to P's length."""
+    return _blocks.dequantize(P, X, axis, block_size)

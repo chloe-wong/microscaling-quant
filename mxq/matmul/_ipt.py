@@ -11,7 +11,7 @@ import torch
 
 from .. import _blocks
 from ._common import check_operands, check_schedule, scale_map
-from .arithmetic import Arithmetic
+from ._arithmetic import Arithmetic
 
 __all__ = ["ipt"]
 

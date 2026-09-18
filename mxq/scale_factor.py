@@ -12,7 +12,7 @@ microxcaling `_quantize_mx` (see mxq/ocp/blockwise.py), including its E8M0 range
 """
 import torch
 
-from ..ocp.formats import FP32_MIN_NORMAL
+from .ocp.formats import FP32_MIN_NORMAL
 
 __all__ = ["mxquant", "ocp"]
 

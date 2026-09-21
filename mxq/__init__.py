@@ -19,12 +19,13 @@ the three compositions. A matmul on the codes is a reducer with an Arithmetic an
     fp64_accum        the same codes with no rounding inside the multiply: the error floor, not an architecture
     schedule          one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL
     scheme            Scheme(name, a, b, reduce): a container for one explicit chain (one matmul); no presets
+    nn                putting Schemes into a model: MXLinear (one nn.Linear through one Scheme), patch (rules per layer or type)
 """
-from . import microxcaling, rounding, arith, schedule, scale_factor, element_quant, block, matmul, scheme
+from . import microxcaling, rounding, arith, schedule, scale_factor, element_quant, block, matmul, scheme, nn
 from .block import BLOCK
 from ._fp64_accum import fp64_accum
 from .element_quant.formats import Format
 from .scheme import Scheme
 
-__all__ = ["microxcaling", "rounding", "arith", "schedule", "scale_factor", "element_quant", "block", "matmul", "scheme",
+__all__ = ["microxcaling", "rounding", "arith", "schedule", "scale_factor", "element_quant", "block", "matmul", "scheme", "nn",
            "BLOCK", "Format", "Scheme", "fp64_accum"]

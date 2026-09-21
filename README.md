@@ -48,6 +48,26 @@ Y = fp64_accum(P_A, X_A, P_B, X_B)                                              
 reducer calls (product, accumulate, add a finished block). Their datapaths are written out stage by stage in
 `mxq/matmul/_arithmetic.py`; the table below is the summary.
 
+Into a model: a rule list says which Scheme each `nn.Linear` runs through, by layer name (`*` is a wildcard) or
+by layer type. First matching rule wins; `None` leaves the layer as it is.
+
+```python
+from functools import partial
+from torch import nn
+from mxq import Scheme, block, matmul, schedule
+from mxq.nn import patch
+
+q = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0)
+HW_FP8 = Scheme("hw_fp8", a=q, b=q, reduce=partial(matmul.systolic, arith=matmul.MXGEMMINI(), schedule=schedule.HW_FINAL))
+
+rules = [("*.self_attn.*", None),        # attention projections stay as they are
+         ("lm_head",       None),
+         (nn.Linear,       HW_FP8)]      # every other Linear
+patch(model, rules, dry_run=True)        # print which layer gets what; change nothing
+handle = patch(model, rules)             # replace the chosen layers with mxq.nn.MXLinear
+handle.revert()                          # put the originals back
+```
+
 Product / accumulator quantization to any float(e, m):
 
 ```python
@@ -89,6 +109,9 @@ mxq/
   _fp64_accum.py     fp64_accum: the same codes with no rounding inside the multiply, the error floor; not an architecture
   schedule.py        one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL; exactly rows entries or ValueError
   scheme.py          Scheme(name, a, b, reduce): one explicit chain for one matmul, .matmul(A, B); no presets
+  nn/                putting Schemes into a model
+    _linear.py       MXLinear: one nn.Linear through one Scheme; weight codes cached, token rows chunked (bit-identical)
+    _patch.py        patch(model, rules): a Scheme per layer name or layer type, first match wins; dry_run, revert
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
 ```
 
@@ -115,6 +138,8 @@ replaces, on CPU and CUDA.
 | `matmul.systolic` + `MXQUANT` | MXQuant `MXLinearSim._simulate_atw`, bit-identical, 3 schedules × 3 product formats |
 | `matmul.systolic` + `MXGEMMINI` | hardware output `Y_hw` of the `rtl_exact` test case (TinyLlama MLP), 65536/65536 identical |
 | `Scheme` | `.matmul` equals the explicit quantizer + reducer calls |
+| `nn.MXLinear` | MXQuant `MXLinearSim.forward`, bit-identical (bf16 inputs, bias, three lengths, two ladders); every chunk size equals unchunked |
+| `nn.patch` | the `rtl_exact` MLP built from `nn.Linear` layers and patched by type: `Y_hw` 65536/65536; rule order, unused-rule and bad-Scheme errors, revert, tied weights |
 | `block.ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
 | `microxcaling/` | upstream microxcaling clone, AST-verbatim and numeric |
 | `rounding` | qtorch (ties away), torch bf16 and gemmini golden `_rne_e8` (RNE), golden `mx_product_quantize_trunc` (truncate) |

@@ -18,7 +18,7 @@ the three compositions. A matmul on the codes is a reducer with an Arithmetic an
                       Arithmetic = the three rounding points, with MXQUANT and MXGEMMINI as the two documented datapaths
     fp64_accum        the same codes with no rounding inside the multiply: the error floor, not an architecture
     schedule          one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL
-    scheme            Scheme(name, act, weight, reduce): a container for one explicit chain; no presets
+    scheme            Scheme(name, a, b, reduce): a container for one explicit chain (one matmul); no presets
 """
 from . import microxcaling, rounding, arith, schedule, scale_factor, element_quant, block, matmul, scheme
 from .block import BLOCK

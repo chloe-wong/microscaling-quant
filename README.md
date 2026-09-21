@@ -88,7 +88,7 @@ mxq/
     _common.py       operand shape, dtype and device checks, schedule length check, per-block scale map
   _fp64_accum.py     fp64_accum: the same codes with no rounding inside the multiply, the error floor; not an architecture
   schedule.py        one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL; exactly rows entries or ValueError
-  scheme.py          Scheme(name, act, weight, reduce): a container for one explicit chain, .matmul(A, B); no presets
+  scheme.py          Scheme(name, a, b, reduce): one explicit chain for one matmul, .matmul(A, B); no presets
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
 ```
 

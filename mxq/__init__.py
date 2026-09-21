@@ -14,15 +14,17 @@ the three compositions. A matmul on the codes is a reducer with an Arithmetic an
     microxcaling      Microsoft's microxcaling package, verbatim: the oracle block.ocp is validated against
     rounding          ties_away | rne | truncate, on float32 bit patterns or integers; shared by every quantizer
     arith             exact_add, truncate_significand, saturate_product: what a PE does between quantizations
-    matmul            reducers Y = Aᵀ·B from codes and scales: systolic, ipt, fp64_accum;
+    matmul            the array dataflows, Y = Aᵀ·B from codes and scales: systolic, ipt;
                       Arithmetic = the three rounding points, with MXQUANT and MXGEMMINI as the two documented datapaths
+    fp64_accum        the same codes with no rounding inside the multiply: the error floor, not an architecture
     schedule          one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL
     scheme            Scheme(name, act, weight, reduce): a container for one explicit chain; no presets
 """
 from . import microxcaling, rounding, arith, schedule, scale_factor, element_quant, block, matmul, scheme
 from .block import BLOCK
+from ._fp64_accum import fp64_accum
 from .element_quant.formats import Format
 from .scheme import Scheme
 
 __all__ = ["microxcaling", "rounding", "arith", "schedule", "scale_factor", "element_quant", "block", "matmul", "scheme",
-           "BLOCK", "Format", "Scheme"]
+           "BLOCK", "Format", "Scheme", "fp64_accum"]

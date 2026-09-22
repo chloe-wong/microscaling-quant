@@ -32,7 +32,7 @@ import torch
 from .. import arith
 from ..element_quant import float_em
 
-__all__ = ["Arithmetic", "MXQUANT", "MXGEMMINI"]
+__all__ = ["Arithmetic", "MXQUANT", "MXGEMMINI", "compiled"]
 
 Tensor = torch.Tensor
 
@@ -71,3 +71,14 @@ def MXGEMMINI(prod_e: int = 4, prod_m: int = 3) -> Arithmetic:
         acc_add=lambda S, p, e, m: arith.exact_add(lane(S, e, m), lane(p, e, m), e, m),
         tile_add=lambda C, tile: arith.exact_add(lane(C, 8, 7), lane(tile, 8, 7), 8, 7),
     )
+
+
+def compiled(arith: Arithmetic) -> Arithmetic:
+    """The same Arithmetic with its three functions passed through torch.compile, which fuses each chain of
+    elementwise kernels into a few. Same IEEE operations per element in the same order, so the results are
+    bit-identical; this is checked, not assumed (tests compare it with the uncompiled one bit for bit, including
+    subnormal, Inf, NaN and saturating inputs). Needs a GPU with Triton; the first call of each shape compiles."""
+    import torch._dynamo
+    torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 256)   # one entry per shape and lane
+    c = lambda f: torch.compile(f, dynamic=False)
+    return Arithmetic(name=f"compiled({arith.name})", product=c(arith.product), acc_add=c(arith.acc_add), tile_add=c(arith.tile_add))

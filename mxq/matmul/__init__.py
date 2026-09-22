@@ -13,8 +13,8 @@ Arithmetics, i.e. the `arith` argument, not matmuls themselves.
 For the same codes with no rounding inside the multiply, see mxq.fp64_accum: it is a measuring stick, not an
 architecture, so it is not here.
 """
-from ._arithmetic import Arithmetic, MXQUANT, MXGEMMINI
+from ._arithmetic import Arithmetic, MXQUANT, MXGEMMINI, compiled
 from ._systolic import systolic
 from ..schedule import HW_FINAL
 
-__all__ = ["Arithmetic", "MXQUANT", "MXGEMMINI", "systolic", "HW_FINAL"]
+__all__ = ["Arithmetic", "MXQUANT", "MXGEMMINI", "compiled", "systolic", "HW_FINAL"]

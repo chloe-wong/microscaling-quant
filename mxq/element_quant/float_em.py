@@ -78,7 +78,9 @@ def _ieee(z, e, m, rounding_mode):
     Subnormals fall out because step stops shrinking at emin; a carry past 2^(m+1) is handled by the
     overflow test on the value itself."""
     x = z.detach()
-    x = x if x.dtype == torch.float64 else x.to(torch.float32)
+    # e = 8: the subnormal step 2^(emin - m) is itself a float32 subnormal, which fused GPU kernels may flush to
+    # zero; in float64 it is a normal number. Every operation below is exact, so the result does not depend on this.
+    x = x if x.dtype == torch.float64 else x.to(torch.float64 if e == 8 else torch.float32)
     b = bias(e)
     emin, emax = 1 - b, b
 

@@ -4,7 +4,7 @@ This is not an architecture, so it lives outside mxq.matmul, which holds only ar
 measuring stick that separates the two sources of error in a quantized matmul:
 
     what                                        how
-    quantized operands, the array's arithmetic  matmul.systolic or matmul.ipt
+    quantized operands, the array's arithmetic  matmul.systolic
     quantized operands, exact arithmetic        fp64_accum (this function)
     the original operands, exact arithmetic     A.double().t() @ B.double(), one line, no function needed
 

@@ -4,7 +4,7 @@
     acc_add(S, p, e, m)    add product p into running sum S held in an accumulator of format float(e, m)
     tile_add(C, tile)      add a finished, rescaled block sum into the output C
 
-A reducer (matmul.systolic, matmul.ipt) decides the ORDER of these calls; an Arithmetic decides the ROUNDING
+The reducer (matmul.systolic) decides the ORDER of these calls; an Arithmetic decides the ROUNDING
 at each. Two Arithmetics are defined here, each built only from named mxq calls (float_em, arith); no rounding
 rule is written in this file. Stage by stage:
 

@@ -41,7 +41,6 @@ P_A, X_A = block.mxgemmini.quantize(x.t(), "MXFP8_E4M3", axis=0)      # A = xᵀ
 P_B, X_B = block.mxgemmini.quantize(W.t(), "MXFP8_E4M3", axis=0)      # B = Wᵀ, K×N
 Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), schedule.HW_FINAL)    # M×N, bit-identical to MX-Gemmini
 Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXQUANT(4, 3), schedule.HW_FINAL)  # MXQuant's simulation
-Y = matmul.ipt(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), [(4, 4), (4, 4), (4, 4), (8, 7)])   # adder tree, one format per level
 Y = fp64_accum(P_A, X_A, P_B, X_B)                                                 # same codes, no rounding inside the multiply
 ```
 
@@ -86,7 +85,6 @@ mxq/
   matmul/            the array dataflows: Y = Aᵀ·B from codes and scales, summed in the hardware's order
     _arithmetic.py   Arithmetic(product, acc_add, tile_add); MXQUANT(prod_e, prod_m) and MXGEMMINI(): the datapaths, stage by stage
     _systolic.py     the PE column (window deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate
-    _ipt.py          the inner-product tree: fanin (16) products at once, log2(fanin) adder levels each with its own format, per-block rescale and accumulate
     _common.py       operand shape, dtype and device checks, schedule length check, per-block scale map
   _fp64_accum.py     fp64_accum: the same codes with no rounding inside the multiply, the error floor; not an architecture
   schedule.py        one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL; exactly rows entries or ValueError
@@ -116,7 +114,6 @@ replaces, on CPU and CUDA.
 | `block.mxgemmini` | MXQuant `quantize_mx_block32` (round nearest); operands of npu-exploration `rtl_exact` saved hardware test case |
 | `matmul.systolic` + `MXQUANT` | MXQuant `MXLinearSim._simulate_atw`, bit-identical, 3 schedules × 3 product formats |
 | `matmul.systolic` + `MXGEMMINI` | hardware output `Y_hw` of the `rtl_exact` test case (TinyLlama MLP), 65536/65536 identical |
-| `matmul.ipt` | scalar per-element tree in plain Python, bit-identical, fanin 2 to 32 with K tails; `mxq.fp64_accum` without rounding |
 | `Scheme` | `.matmul` equals the explicit quantizer + reducer calls |
 | `block.ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
 | `microxcaling/` | upstream microxcaling clone, AST-verbatim and numeric |

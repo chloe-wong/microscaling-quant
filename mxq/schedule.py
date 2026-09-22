@@ -5,7 +5,7 @@
     fixed(e, m, rows=16)  -> [(e, m)] * rows
     HW_FINAL                                  the MX-Gemmini tapeout's 16 lanes
 
-What a position is belongs to the reducer: a PE lane for matmul.systolic, a tree level for matmul.ipt.
+A position is a PE lane of matmul.systolic.
 A schedule is fully defined when positions 0..rows-1 are each given once and nothing else is.
 """
 import csv

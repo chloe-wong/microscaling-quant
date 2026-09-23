@@ -58,11 +58,11 @@ from mxq import Scheme, block, matmul, schedule
 from mxq.nn import patch
 
 q = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0)
-HW_FP8 = Scheme("hw_fp8", a=q, b=q, reduce=partial(matmul.systolic, arith=matmul.MXGEMMINI(), schedule=schedule.HW_FINAL))
+chain = Scheme("mesh_fp8", a=q, b=q, reduce=partial(matmul.systolic, arith=matmul.MXGEMMINI(), schedule=schedule.HW_FINAL))
 
 rules = [("*.self_attn.*", None),        # attention projections stay as they are
          ("lm_head",       None),
-         (nn.Linear,       HW_FP8)]      # every other Linear
+         (nn.Linear,       chain)]       # every other Linear
 patch(model, rules, dry_run=True)        # print which layer gets what; change nothing
 handle = patch(model, rules)             # replace the chosen layers with mxq.nn.MXLinear
 handle.revert()                          # put the originals back

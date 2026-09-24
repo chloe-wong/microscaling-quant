@@ -92,6 +92,10 @@ def main():
     ap.add_argument("--gpus", default=None, help="e.g. 0,1,2,3: one worker per GPU, samples split between them")
     ap.add_argument("--samples", default=None, help="worker only: START:END sample indices")
     ap.add_argument("--out", default=None, help="result JSON (default experiments/results/<rules>.json)")
+    ap.add_argument("--no-cache-weights", action="store_true",
+                    help="recompute the weight codes each forward instead of holding them. The cache is a "
+                         "second float32 copy of every quantized weight, which is what runs a large model out "
+                         "of memory; recomputing costs well under one percent of a run.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -114,6 +118,8 @@ def main():
                    "--nsamples", str(args.nsamples), "--seed", str(args.seed), "--samples", f"{lo}:{hi}", "--out", str(part)]
             if args.chunk:
                 cmd += ["--chunk", str(args.chunk)]
+            if args.no_cache_weights:
+                cmd += ["--no-cache-weights"]
             procs.append(subprocess.Popen(cmd, env={**os.environ, "CUDA_VISIBLE_DEVICES": g}))
         if any(p.wait() for p in procs):
             raise SystemExit("a worker failed")
@@ -129,7 +135,8 @@ def main():
         model = load_model(args.model_id, args.seqlen)
         table = []
         if rules is not None:
-            handle = patch(model, rules, chunk=args.chunk, dry_run=args.dry_run)
+            handle = patch(model, rules, chunk=args.chunk, dry_run=args.dry_run,
+                           cache_weights=not args.no_cache_weights)
             table = handle.table
         if args.dry_run:
             return

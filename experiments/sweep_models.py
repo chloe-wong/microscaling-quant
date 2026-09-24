@@ -116,6 +116,8 @@ def run(model_id, rules, args):
            "--seqlen", str(args.seqlen)]
     if args.gpus:
         cmd += ["--gpus", args.gpus]
+    if not args.cache_weights:
+        cmd += ["--no-cache-weights"]
     if args.dry_run:
         cmd += ["--dry-run"]
     print(f"\n=== {model_id}  [{rules}] ===", flush=True)
@@ -172,6 +174,10 @@ def main():
     ap.add_argument("--gpus", default=None, help="e.g. 0,1,2,3: samples split between them, per run")
     ap.add_argument("--out-dir", default=str(HERE / "results" / "sweep"))
     ap.add_argument("--force", action="store_true", help="recompute runs that already have a result file")
+    ap.add_argument("--cache-weights", action="store_true",
+                    help="hold the quantized weight codes instead of recomputing them. Off by default: the "
+                         "cache is a second float32 copy of every quantized weight and is what puts a 7B "
+                         "model over one card.")
     ap.add_argument("--dry-run", action="store_true",
                     help="check every model's layer set from its config and print it; download and run nothing")
     ap.add_argument("--why", action="store_true", help="print the slate and why each model is on it")

@@ -35,15 +35,23 @@ def systolic(P_A: torch.Tensor, X_A: torch.Tensor, P_B: torch.Tensor, X_B: torch
     if block_size % window != 0:
         raise ValueError(f"window {window} must divide block size {block_size}")
     C = torch.zeros((M, N), dtype=torch.float32, device=P_A.device)
+    # An Arithmetic may offer to do a whole window at once (mxq.matmul.compiled does). Same operations in the
+    # same order; it is one fused kernel instead of one per step. A short tail window is a different shape, so
+    # it stays on the step-by-step path rather than forcing a rebuild per tail length.
+    body = arith.fused_window(schedule, window) if getattr(arith, "fused_window", None) else None
 
     for g in range(0, K, block_size):
         g_end = min(g + block_size, K)
         scales = scale_map(X_A, X_B, g // block_size)
         for k_base in range(g, g_end, window):
-            S = torch.zeros((M, N), dtype=torch.float32, device=P_A.device)
-            for k in range(k_base, min(k_base + window, g_end)):
-                p = arith.product(P_A[k].unsqueeze(1), P_B[k].unsqueeze(0))
-                e, m = schedule[k % window]
-                S = arith.acc_add(S, p, e, m)
+            k_end = min(k_base + window, g_end)
+            if body is not None and k_end - k_base == window:
+                S = body(P_A[k_base:k_end], P_B[k_base:k_end])
+            else:
+                S = torch.zeros((M, N), dtype=torch.float32, device=P_A.device)
+                for k in range(k_base, k_end):
+                    p = arith.product(P_A[k].unsqueeze(1), P_B[k].unsqueeze(0))
+                    e, m = schedule[k % window]
+                    S = arith.acc_add(S, p, e, m)
             C = arith.tile_add(C, S * scales)
     return C.to(torch.float32)

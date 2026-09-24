@@ -25,7 +25,7 @@ The MXQUANT lane add must be a plain fp32 add: MXQuant rounds the fp32 sum, not 
 on rare inputs, so MXQUANT does not use arith.exact_add.
 """
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional, Sequence, Tuple
 
 import torch
 
@@ -43,6 +43,12 @@ class Arithmetic:
     product: Callable[[Tensor, Tensor], Tensor]
     acc_add: Callable[[Tensor, Tensor, int, int], Tensor]
     tile_add: Callable[[Tensor, Tensor], Tensor]
+    #: optional: given a schedule and a window depth, return one function that does a whole window of
+    #: products and accumulations. Same operations in the same order as calling product and acc_add step by
+    #: step; it exists only so the three stages can be fused into one GPU kernel. A reducer uses it when it
+    #: has a full window and falls back to the stages otherwise. `compiled` below sets it; a plain
+    #: Arithmetic leaves it None and nothing changes.
+    fused_window: Optional[Callable[[Sequence[Tuple[int, int]], int], Callable]] = None
 
 
 def MXQUANT(prod_e: int, prod_m: int) -> Arithmetic:
@@ -79,6 +85,31 @@ def compiled(arith: Arithmetic) -> Arithmetic:
     bit-identical; this is checked, not assumed (tests compare it with the uncompiled one bit for bit, including
     subnormal, Inf, NaN and saturating inputs). Needs a GPU with Triton; the first call of each shape compiles."""
     import torch._dynamo
-    torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 256)   # one entry per shape and lane
+    torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 512)   # one entry per shape, lane and window
     c = lambda f: torch.compile(f, dynamic=False)
-    return Arithmetic(name=f"compiled({arith.name})", product=c(arith.product), acc_add=c(arith.acc_add), tile_add=c(arith.tile_add))
+    cache: dict = {}
+
+    def fused_window(schedule, window: int):
+        """One compiled function for a whole window, built once per (schedule, window) and reused.
+
+        A step of the loop launches its own kernels, about nine of them, and a single layer at 2048 tokens
+        runs tens of thousands of steps, so the loop is bound by launch overhead rather than by arithmetic.
+        The window depth is a constant, so the compiler unrolls the whole window into one graph and fuses
+        across it. Nothing about the order or the rounding changes."""
+        key = (tuple(tuple(t) for t in schedule), window)
+        if key not in cache:
+            sched = list(key[0])
+
+            def body(A, B):
+                """A: window x M codes, B: window x N codes -> that window's sum, M x N float32."""
+                S = torch.zeros((A.shape[1], B.shape[1]), dtype=torch.float32, device=A.device)
+                for i in range(window):
+                    e, m = sched[i]
+                    S = arith.acc_add(S, arith.product(A[i].unsqueeze(1), B[i].unsqueeze(0)), e, m)
+                return S
+
+            cache[key] = torch.compile(body, dynamic=False)
+        return cache[key]
+
+    return Arithmetic(name=f"compiled({arith.name})", product=c(arith.product), acc_add=c(arith.acc_add),
+                      tile_add=c(arith.tile_add), fused_window=fused_window)

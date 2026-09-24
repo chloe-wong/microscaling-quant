@@ -106,6 +106,8 @@ def main():
         bounds = [round(i * args.nsamples / len(gpus)) for i in range(len(gpus) + 1)]
         parts, procs = [], []
         for g, lo, hi in zip(gpus, bounds, bounds[1:]):
+            if lo == hi:                                           # fewer samples than GPUs: nothing to do
+                continue
             part = out.with_suffix(f".part{lo}_{hi}.json")
             parts.append(part)
             cmd = [sys.executable, __file__, "--rules", args.rules, "--model-id", args.model_id, "--seqlen", str(args.seqlen),
@@ -123,6 +125,7 @@ def main():
     else:
         ids = load_samples(args.model_id, args.seqlen, args.nsamples, args.seed)
         lo, hi = (int(v) for v in args.samples.split(":")) if args.samples else (0, ids.shape[0])
+        hi = min(hi, ids.shape[0])                                 # asking for more samples than the data has
         model = load_model(args.model_id, args.seqlen)
         table = []
         if rules is not None:

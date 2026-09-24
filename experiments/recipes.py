@@ -22,6 +22,9 @@ frozen fixture.
 `hw_fp8_baseline` is the same datapath on a uniform ladder. No hardware output exists for it, so it is a
 reference point for the ladder, not a claim about hardware.
 
+`hw_fp8_tapeout_rne` is the tapeout ladder with the operand rounding the RTL switched to on 2026-09-10. It is
+what the hardware does now; it is NOT what the frozen fixture covers, so it carries no bit-exact anchor.
+
 Use:  from experiments import recipes;  patch(model, recipes.RULES["hw_fp8_tapeout"])
 """
 from functools import partial
@@ -31,7 +34,7 @@ from torch import nn
 from mxq import Scheme, block, matmul, scale_factor, schedule
 from mxq.nn import is_attention
 
-__all__ = ["HW_FP8_BASELINE", "HW_FP8_TAPEOUT", "RULES"]
+__all__ = ["HW_FP8_BASELINE", "HW_FP8_TAPEOUT", "HW_FP8_TAPEOUT_RNE", "RULES"]
 
 #: MX-Gemmini's operand codes. Both knobs are spelled out: these are the ones the frozen fixture covers.
 _hw_fp8 = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0,
@@ -51,6 +54,15 @@ HW_FP8_BASELINE = _hw("hw_fp8_baseline", schedule.fixed(8, 7))
 #: The MX-Gemmini datapath on the tapeout ladder. Equals rtl_exact's Y_hw, 65536 of 65536 elements.
 HW_FP8_TAPEOUT = _hw("hw_fp8_tapeout", schedule.HW_FINAL)
 
+#: MX-Gemmini's operand codes as the RTL rounds them since 2026-09-10: RNE, and the hardware's scale floor
+#: (FLT_EPSILON). Only all-zero or very small blocks see the floor; the rounding touches every exact tie.
+_hw_fp8_rne = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0,
+                      rounding_mode="rne", scale_floor=scale_factor.HARDWARE_FLOOR)
+
+#: The tapeout ladder with today's operand rounding. Not covered by the frozen fixture.
+HW_FP8_TAPEOUT_RNE = Scheme("hw_fp8_tapeout_rne", a=_hw_fp8_rne, b=_hw_fp8_rne,
+                            reduce=partial(matmul.systolic, arith=_hw_arith, schedule=schedule.HW_FINAL))
+
 
 def _mlp_and_head(scheme):
     """MXQuant's layer set: every nn.Linear except the attention projections, which are left alone whole
@@ -62,6 +74,7 @@ RULES = {
     "none": None,                                       # no patch at all: the model as loaded, in bf16
     "hw_fp8_baseline": _mlp_and_head(HW_FP8_BASELINE),
     "hw_fp8_tapeout": _mlp_and_head(HW_FP8_TAPEOUT),
+    "hw_fp8_tapeout_rne": _mlp_and_head(HW_FP8_TAPEOUT_RNE),
 }
 
 try:                                                    # machine-local extras, not part of this repo

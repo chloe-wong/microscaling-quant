@@ -2,7 +2,8 @@
 
     rules = [("lm_head", None),                 # a layer name; * is a wildcard.  None = leave the layer as it is
              ("*.mlp.down_proj", FP6),          # a Scheme
-             (nn.Linear, FP8)]                  # a layer type; or a function (name, module) -> bool
+             (is_attention, None),              # a function (name, module, parent) -> bool
+             (nn.Linear, FP8)]                  # a layer type
     handle = patch(model, rules)                # first matching rule wins, top to bottom
     print(handle)                               # every Linear, the rule it got, its Scheme
     handle.revert()                             # put the original layers back
@@ -25,18 +26,29 @@ from torch import nn
 from ..scheme import Scheme
 from ._linear import MXLinear
 
-__all__ = ["patch"]
+__all__ = ["patch", "is_attention"]
 
-Selector = Union[str, type, Callable[[str, nn.Module], bool]]
+Selector = Union[str, type, Callable[[str, nn.Module, nn.Module], bool]]
 Rule = Tuple[Selector, Optional[Scheme]]
 
 
-def _matches(selector: Selector, name: str, module: nn.Module) -> bool:
+def is_attention(name: str, module: nn.Module, parent: nn.Module) -> bool:
+    """Is this Linear one of an attention module's projections?
+
+    True when the module holding it has both `q_proj` and `k_proj`. That is the test MXQuant's eval_complete.py
+    uses to find attention, so a rule list written with it keeps MXQuant's layer set exactly. It asks what the
+    parent is, not what it is called, so it holds for any model that names its projections the usual way and no
+    model-specific string has to appear in a rule list.
+    """
+    return hasattr(parent, "q_proj") and hasattr(parent, "k_proj")
+
+
+def _matches(selector: Selector, name: str, module: nn.Module, parent: nn.Module) -> bool:
     if isinstance(selector, str):
         return fnmatchcase(name, selector)
     if isinstance(selector, type):
         return isinstance(module, selector)
-    return bool(selector(name, module))
+    return bool(selector(name, module, parent))
 
 
 class Handle:
@@ -73,7 +85,7 @@ def patch(model: nn.Module, rules: Sequence[Rule], chunk: Optional[int] = None, 
         if not isinstance(module, nn.Linear) or not name:
             continue
         parent = holder[name.rpartition(".")[0]]
-        hit = next((i for i, (selector, _) in enumerate(rules) if _matches(selector, name, module)), None)
+        hit = next((i for i, (selector, _) in enumerate(rules) if _matches(selector, name, module, parent)), None)
         chosen.append((name, module, parent, hit))
     unused = [i for i in range(len(rules)) if all(hit != i for _, _, _, hit in chosen)]
     if unused:

@@ -49,9 +49,25 @@ MODELS = [
     ("mistralai/Mistral-7B-v0.3",
      "the scale a deployment sits at, with grouped-query attention at width 4096"),
     ("Qwen/Qwen2.5-7B",
-     "the third point of a 0.5B, 1.5B, 7B curve inside one family: the cleanest scaling evidence available "
-     "without a gated model"),
+     "the third point of a 0.5B, 1.5B, 7B curve inside one family"),
+    ("meta-llama/Llama-2-7b-hf",
+     "the reference point the quantization literature uses. Nearly every published WikiText-2 perplexity is "
+     "on this model, so it is how an outside reader places our number"),
+    ("meta-llama/Llama-3.1-8B",
+     "a modern llama, with a 128256-token vocabulary and grouped-query attention. Paired with Llama-2-7B it "
+     "separates generation from size"),
+    ("meta-llama/Llama-2-13b-hf",
+     "7B to 13B inside one family. The largest that fits one L40S in bf16 with room left for the simulator"),
 ]
+
+#: Checked and rejected, so the same ground is not covered twice:
+#:   DeepSeek-V2-Lite, DeepSeek-V3   multi-head latent attention: the projections are q_a_proj, q_b_proj,
+#:                                   kv_a_proj_with_mqa and kv_b_proj, so there is no q_proj or k_proj for
+#:                                   is_attention to find, and the pre-flight drops them. Supporting them
+#:                                   means a selector for MLA, not a bigger run.
+#:   deepseek-llm-7b-base            llama-shaped and otherwise eligible, but the repo ships only .bin
+#:                                   weights and llm_ppl loads with use_safetensors=True.
+#:   GPT-NeoX, Pythia, Falcon        fused query_key_value, same problem as MLA.
 
 
 def slug(model_id):

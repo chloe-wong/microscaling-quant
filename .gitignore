@@ -6,3 +6,5 @@ build/
 dist/
 notes.md
 tests/
+experiments/results/
+experiments/_local.py

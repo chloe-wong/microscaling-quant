@@ -151,9 +151,9 @@ def report(rows, dropped, layers, args):
     print("\n" + text + "\n", flush=True)
     d = Path(args.out_dir)
     d.mkdir(parents=True, exist_ok=True)
-    (d / "summary.txt").write_text(f"{args.quant_rules}, {args.nsamples} samples of {args.seqlen} tokens, "
+    (d / f"summary_{args.quant_rules}.txt").write_text(f"{args.quant_rules}, {args.nsamples} samples of {args.seqlen} tokens, "
                                    f"seed {args.seed}\n\n{text}\n")
-    (d / "summary.json").write_text(json.dumps(
+    (d / f"summary_{args.quant_rules}.json").write_text(json.dumps(
         {"rules": args.quant_rules, "nsamples": args.nsamples, "seqlen": args.seqlen, "seed": args.seed,
          "models": {m: {"layers_quantized": layers.get(m, (0, 0))[0], "layers_total": layers.get(m, (0, 0))[1],
                         **{k: {"perplexity": v["perplexity"], "seconds": v["seconds"],

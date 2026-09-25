@@ -44,12 +44,3 @@ def quantize(V, fmt, axis=0, block_size=_driver.BLOCK, *,
 def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = _driver.BLOCK) -> torch.Tensor:
     """V_hat = P * expand(X): each scale repeated block_size times along `axis`, cut to P's length."""
     return _driver.dequantize(P, X, axis, block_size)
-
-if __name__ == "__main__":
-    torch.manual_seed(0)
-    W = torch.randn(4096, 1024, device="cuda")
-    err = lambda P, X: ((dequantize(P, X) - W).pow(2).mean() / W.pow(2).mean()).item()
-
-    print(f"FP6          rel. MSE {err(*mxgemmini.quantize(W, 'MXFP6_E3M2')):.3e}")
-    for k in (16, 8, 4):
-        print(f"FP6 + LUT{k:<2}  rel. MSE {err(*quantize(W, 'MXFP6_E3M2', num_signposts=k)):.3e}")

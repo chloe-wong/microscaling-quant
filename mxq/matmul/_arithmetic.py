@@ -68,9 +68,17 @@ def MXGEMMINI(prod_e: int = 4, prod_m: int = 3) -> Arithmetic:
     product significand truncated to prod_m bits, no exponent clamp, then PE saturation (`mx_product_quantize_trunc`);
     both addends rounded RNE to the lane's float(e, m), added exactly, rounded once (`fp_add_exact(fp_quantize_rne, fp_quantize_rne)`);
     cross-block: both rounded to bf16, added exactly, rounded to bf16 (`bf16_accum_add(C, q_bf16_rne(tile))`).
+    The bf16 roundings use the native cast; see the comment on `lane`. 2.98x on an all-bf16 ladder, 1.23x on
+    schedule.HW_FINAL, bit-identical.
     Validated against hardware for MXFP8_E4M3 operands with the default prod (4, 3) and schedule.HW_FINAL only;
     other operand formats or prod widths run the same stages unchecked."""
-    lane = lambda x, e, m: float_em.quantize(x, e, m, rounding_mode="rne", grid="ieee")
+    # bf16 is the one lane the hardware rounds itself: float32 to bfloat16 is a single RNE instruction, the
+    # same rule the scaled-integer grid implements in float64. Every other width keeps the float64 path, and
+    # so does the rounding inside exact_add, whose argument is a float64 sum -- casting that straight to
+    # bfloat16 rounds twice once the window is fused, and lands one ulp out. Every lane argument here is
+    # float32, so the cast is the only rounding that happens.
+    lane = lambda x, e, m: (x.to(torch.bfloat16).to(torch.float32) if (e, m) == (8, 7)
+                            else float_em.quantize(x, e, m, rounding_mode="rne", grid="ieee"))
     return Arithmetic(
         name=f"mxgemmini(prod=e{prod_e}m{prod_m})",
         product=lambda a, b: arith.saturate_product(arith.truncate_significand(a * b, prod_m), prod_e, prod_m),

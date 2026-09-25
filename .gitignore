@@ -8,3 +8,4 @@ notes.md
 tests/
 experiments/results/
 experiments/_local.py
+experiments/sweep_models.py

@@ -1,31 +1,41 @@
-"""The named Schemes and rule lists the experiments use. Every chain is written out in full here, so a name in
-a results table can always be traced back to the exact quantizers, arithmetic and ladder behind it.
+"""The named Schemes the experiments use, and the rule lists that say which layer gets which.
+
+THE CANONICAL FLOW IS `hw_mxfp8_tapeout`. It is MX-Gemmini as the RTL computes it today, and every choice in
+it is the hardware's, not a simulation's. Anything else here exists to be compared against it and says so.
 
     Scheme      how one matmul is done: quantizer for A, quantizer for B, dataflow + Arithmetic + ladder
     rule list   which nn.Linear gets which Scheme: (layer name with * wildcards | layer type | function,
                 Scheme | None); first matching rule wins, and None leaves the layer as it is
 
-Both Schemes are the MX-Gemmini datapath: its operand codes, its arithmetic, its 16-deep accumulator window.
-They differ only in the accumulator ladder, which is what the tapeout had to choose:
+`hw_mxfp8_tapeout`, choice by choice, and where each choice comes from:
 
-    hw_fp8_baseline   every lane bf16                      what a ladder is measured against
-    hw_fp8_tapeout    8x e4m4, 2x e4m5, 5x e4m6, 1x bf16   the tapeout ladder
+    block scale       X = 2^floor(log2 max(amax, floor)), block 32 along axis 0, no emax offset
+                      -- Gemmini RTL and spike (log2_pmax = 0)
+    scale floor       HARDWARE_FLOOR = 2^-23, i.e. FLT_EPSILON
+                      -- Gemmini mx_fp_math.h: max(amax, FLT_EPSILON)
+    element format    MXFP8_E4M3 on the OCP grid: true subnormals, saturate at max_norm 448
+                      -- Gemmini
+    element rounding  RNE -- Gemmini mx_fp_math.h, since 2026-09-10
+    product           significand truncated to 3 bits, no exponent clamp, saturated at 448
+                      -- Gemmini PE column (mx_product_quantize_trunc)
+    accumulate        both addends rounded RNE to the lane's float(e, m), added exactly, rounded once
+                      -- Gemmini PE column (fp_add_exact)
+    cross-tile        both rounded to bf16 RNE, added exactly, rounded to bf16
+                      -- Gemmini PE column (bf16_accum_add)
+    ladder            16 lanes: 8x e4m4, 2x e4m5, 5x e4m6, 1x bf16 -- the tapeout's choice
+    window            16 deep, inside blocks of 32 -- Gemmini
+    layers            every nn.Linear except the attention projections; lm_head IS quantized
+                      -- MXQuant's layer set (complete_integration_e2e/eval_complete.py)
 
-What is gated, and what is not. `hw_fp8_tapeout` is bit-identical to the saved hardware output in
-npu-exploration, all 65536 elements of `rtl_exact/fixture_llama_mlp.npz::Y_hw`, which spike reproduces element
-for element. That fixture was frozen on 2026-09-06, so the gate covers `rounding_mode="ties_away"` with
-`scale_floor=MXQUANT_FLOOR`. Both are written out below rather than left to defaults, so changing the defaults
-cannot silently change what this claims. The RTL has rounded operands RNE since 2026-09-10; passing
-`rounding_mode="rne"` and `scale_floor=scale_factor.HARDWARE_FLOOR` follows it, and is NOT covered by the
-frozen fixture.
+What is proven and what is not. The only bit-exact hardware capture is
+npu-exploration `rtl_exact/fixture_llama_mlp.npz::Y_hw`, frozen 2026-09-06. It predates the RTL's move to RNE
+on 2026-09-10, so it anchors `hw_mxfp8_fixture`, not the canonical flow: that recipe reproduces all 65536
+elements of it. `hw_mxfp8_tapeout` differs from it ONLY in operand rounding and the scale floor, and the
+divergence has been traced to exactly that -- forcing npu-exploration's golden back to ties-away reproduces
+the same 65536/65536. A fresh capture from the current Gemmini would anchor the canonical flow directly; until
+then its hardware claim rests on that traced equivalence, not on a capture.
 
-`hw_fp8_baseline` is the same datapath on a uniform ladder. No hardware output exists for it, so it is a
-reference point for the ladder, not a claim about hardware.
-
-`hw_fp8_tapeout_rne` is the tapeout ladder with the operand rounding the RTL switched to on 2026-09-10. It is
-what the hardware does now; it is NOT what the frozen fixture covers, so it carries no bit-exact anchor.
-
-Use:  from experiments import recipes;  patch(model, recipes.RULES["hw_fp8_tapeout"])
+Use:  from experiments import recipes;  patch(model, recipes.RULES["hw_mxfp8_tapeout"])
 """
 from functools import partial
 
@@ -34,47 +44,45 @@ from torch import nn
 from mxq import Scheme, block, matmul, scale_factor, schedule
 from mxq.nn import is_attention
 
-__all__ = ["HW_FP8_BASELINE", "HW_FP8_TAPEOUT", "HW_FP8_TAPEOUT_RNE", "RULES"]
+__all__ = ["OPERANDS", "ARITHMETIC", "LADDER", "HW_MXFP8_TAPEOUT", "HW_MXFP8_FIXTURE",
+           "mlp_and_head", "RULES"]
 
-#: MX-Gemmini's operand codes. Both knobs are spelled out: these are the ones the frozen fixture covers.
-_hw_fp8 = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0,
-                  rounding_mode="ties_away", scale_floor=scale_factor.MXQUANT_FLOOR)
+#: THE operand quantizer: MX-Gemmini's codes as the RTL computes them today. Both knobs are spelled out so a
+#: change to mxq's defaults cannot silently move what this claims. Import this rather than rebuilding it --
+#: a second copy is how two recipes quietly stop describing the same hardware.
+OPERANDS = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0,
+                   rounding_mode="rne", scale_floor=scale_factor.HARDWARE_FLOOR)
 
-#: matmul.compiled fuses the arithmetic's GPU kernels. Bit-identical, and the reason a run takes minutes.
-_hw_arith = matmul.compiled(matmul.MXGEMMINI())
+#: THE arithmetic: the three rounding points of MX-Gemmini's PE column. `compiled` fuses its GPU kernels and
+#: is bit-identical; it is the reason a run takes minutes rather than hours.
+ARITHMETIC = matmul.compiled(matmul.MXGEMMINI())
 
-
-def _hw(name, lanes):
-    return Scheme(name, a=_hw_fp8, b=_hw_fp8, reduce=partial(matmul.systolic, arith=_hw_arith, schedule=lanes))
-
-
-#: The MX-Gemmini datapath with every accumulator lane in bf16.
-HW_FP8_BASELINE = _hw("hw_fp8_baseline", schedule.fixed(8, 7))
-
-#: The MX-Gemmini datapath on the tapeout ladder. Equals rtl_exact's Y_hw, 65536 of 65536 elements.
-HW_FP8_TAPEOUT = _hw("hw_fp8_tapeout", schedule.HW_FINAL)
-
-#: MX-Gemmini's operand codes as the RTL rounds them since 2026-09-10: RNE, and the hardware's scale floor
-#: (FLT_EPSILON). Only all-zero or very small blocks see the floor; the rounding touches every exact tie.
-_hw_fp8_rne = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0,
-                      rounding_mode="rne", scale_floor=scale_factor.HARDWARE_FLOOR)
-
-#: The tapeout ladder with today's operand rounding. Not covered by the frozen fixture.
-HW_FP8_TAPEOUT_RNE = Scheme("hw_fp8_tapeout_rne", a=_hw_fp8_rne, b=_hw_fp8_rne,
-                            reduce=partial(matmul.systolic, arith=_hw_arith, schedule=schedule.HW_FINAL))
+#: THE accumulator ladder the tapeout chose: 8x e4m4, 2x e4m5, 5x e4m6, 1x bf16.
+LADDER = schedule.HW_FINAL
 
 
-def _mlp_and_head(scheme):
+def mlp_and_head(scheme):
     """MXQuant's layer set: every nn.Linear except the attention projections, which are left alone whole
     (a module holding q_proj and k_proj is an attention module). lm_head is quantized."""
     return [(is_attention, None), (nn.Linear, scheme)]
 
 
+#: THE flow. MX-Gemmini as the RTL computes it today.
+HW_MXFP8_TAPEOUT = Scheme("hw_mxfp8_tapeout", a=OPERANDS, b=OPERANDS,
+                          reduce=partial(matmul.systolic, arith=ARITHMETIC, schedule=LADDER))
+
+#: The same flow with the operand rounding and scale floor the RTL used BEFORE 2026-09-10. Not current
+#: hardware. It exists because it is the only thing bit-identical to a real capture -- all 65536 elements of
+#: rtl_exact's Y_hw -- so it is the regression anchor that proves the datapath itself is right.
+_FIXTURE_OPERANDS = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0,
+                            rounding_mode="ties_away", scale_floor=scale_factor.MXQUANT_FLOOR)
+HW_MXFP8_FIXTURE = Scheme("hw_mxfp8_fixture", a=_FIXTURE_OPERANDS, b=_FIXTURE_OPERANDS,
+                          reduce=partial(matmul.systolic, arith=ARITHMETIC, schedule=LADDER))
+
 RULES = {
     "none": None,                                       # no patch at all: the model as loaded, in bf16
-    "hw_fp8_baseline": _mlp_and_head(HW_FP8_BASELINE),
-    "hw_fp8_tapeout": _mlp_and_head(HW_FP8_TAPEOUT),
-    "hw_fp8_tapeout_rne": _mlp_and_head(HW_FP8_TAPEOUT_RNE),
+    "hw_mxfp8_tapeout": mlp_and_head(HW_MXFP8_TAPEOUT),
+    "hw_mxfp8_fixture": mlp_and_head(HW_MXFP8_FIXTURE),
 }
 
 try:                                                    # machine-local extras, not part of this repo

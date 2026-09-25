@@ -1,8 +1,8 @@
 """Perplexity of a causal LM on sampled WikiText-2 with a rule list from experiments/recipes.py.
 
     python experiments/llm_ppl.py --rules none                          # the model as loaded, in bf16
-    python experiments/llm_ppl.py --rules hw_fp8_tapeout --gpus 0,1,2,3
-    python experiments/llm_ppl.py --rules hw_fp8_tapeout --dry-run      # which layer gets which Scheme, then stop
+    python experiments/llm_ppl.py --rules hw_mxfp8_tapeout --gpus 0,1,2,3
+    python experiments/llm_ppl.py --rules hw_mxfp8_tapeout --dry-run      # which layer gets which Scheme, then stop
 
 The result lands in experiments/results/<rules>.json, which is not tracked: it holds the per-sample numbers,
 the rule list and the Schemes as they actually ran, so a number can be traced back to a chain.

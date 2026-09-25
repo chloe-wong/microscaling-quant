@@ -8,7 +8,7 @@ Two runs per model, both through experiments/llm_ppl.py, so the sampling, the lo
 ones every other number here was produced with:
 
     none                  the model as loaded, in bf16. The reference.
-    hw_fp8_tapeout_rne    MXFP8 E4M3 operands, MX-Gemmini arithmetic, the tapeout ladder, and the operand
+    hw_mxfp8_tapeout      MXFP8 E4M3 operands, MX-Gemmini arithmetic, the tapeout ladder, and the operand
                           rounding the RTL has used since 2026-09-10.
 
 Before either pass, every model's layer set is checked from its config alone, on the meta device, so nothing
@@ -167,7 +167,7 @@ def report(rows, dropped, layers, args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models", default=None, help="comma-separated model ids (default: the slate above)")
-    ap.add_argument("--quant-rules", default="hw_fp8_tapeout_rne", help="a key of experiments.recipes.RULES")
+    ap.add_argument("--quant-rules", default="hw_mxfp8_tapeout", help="a key of experiments.recipes.RULES")
     ap.add_argument("--nsamples", type=int, default=16)
     ap.add_argument("--seqlen", type=int, default=2048)
     ap.add_argument("--seed", type=int, default=0)

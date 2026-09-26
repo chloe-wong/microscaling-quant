@@ -4,39 +4,15 @@ import time
 
 import torch
 
-from .kmeans import get_signposts_kMEANS_fp6_parallel
-
-_layer_counter = 0
-_layer_counter_lock = threading.Lock()
-
-
-def _get_next_layer_number():
-    """Thread-safe global counter for layer processing"""
-    global _layer_counter
-    with _layer_counter_lock:
-        _layer_counter += 1
-        num_gpus = torch.cuda.device_count()
-        # Calculate actual layer number (accounting for GPU replicas)
-        actual_layer = (_layer_counter + num_gpus - 1) // num_gpus
-        return actual_layer
+from .kmeans import get_signposts_kMEANS_fp6_parallel, quantize_channels_parallel_kmeans
 
 
 def _quantize_level2(A, num_signposts=16, iters=3, chunk_size=65536, granularity='mx', group_size=32, block_algo="kmeans"):
     assert A.shape[-1] == 32, "Expected last dim = 32"
     orig_shape = A.shape
-    
-    # Helper to get GPU ID for logging
-    def _get_gpu_id(device):
-        if device.type == 'cuda':
-            return f"GPU {device.index}" if device.index is not None else "GPU 0"
-        return "CPU"
-    
-    gpu_id = _get_gpu_id(A.device)
-    layer_num = _get_next_layer_number()
 
     if granularity in ['mx', 'group']:
         s = time.time()
-        # print(f"[{gpu_id}] [Layer {layer_num}] Running '{granularity}' (blockwise) quantization with {block_algo}...")
         blocks = A.reshape(-1, group_size)
         N = blocks.shape[0]
         quantized_blocks = torch.empty_like(blocks)
@@ -44,14 +20,10 @@ def _quantize_level2(A, num_signposts=16, iters=3, chunk_size=65536, granularity
             end = min(start + chunk_size, N)
             chunk = blocks[start:end]
             
-            # --- K-Means/K-Medians Switch ---
             if block_algo == 'kmeans':
-                # print(f"[{gpu_id}] [Layer {layer_num}] running kmeans")
                 centers = get_signposts_kMEANS_fp6_parallel(chunk, num_signposts, iters)
-                # log_signposts(centers)
             else:
                 raise ValueError(f"Unknown block_algo: {block_algo}. Must be 'kmeans' or 'kmedians'.")
-            # --- END: K-Means/K-Medians Switch ---
 
             dist = (chunk.unsqueeze(2) - centers.unsqueeze(1)).abs()
             closest = dist.argmin(dim=2)
@@ -62,3 +34,40 @@ def _quantize_level2(A, num_signposts=16, iters=3, chunk_size=65536, granularity
         
         print(f"Elapsed: {time.time() - s:.3f}s")
         return quantized_blocks.reshape(orig_shape)
+    
+    elif granularity == 'channel':
+        torch.cuda.reset_peak_memory_stats()
+        
+        if block_algo == 'kmedians':
+            raise ValueError(f"Per-Channel must use 'k-means'.")
+
+        # --- 3D case (Fast K-Means) ---
+        if A.ndim == 3:
+            s = time.time()
+            X, Y, D = A.shape
+
+            # Pre-reshape: Makes all Y-channels contiguous rows. Shape: [Y, X*D]
+            A_reshaped = A.permute(1, 0, 2).contiguous().reshape(Y, -1)
+            
+            # Run quantization on all Y channels in parallel
+            quantized_channels = quantize_channels_parallel_kmeans(A_reshaped, num_signposts, iters)
+
+            # Reshape back to original: [Y, X, D] -> [X, Y, D]
+            quantized = quantized_channels.reshape(Y, X, D).permute(1, 0, 2).contiguous()
+            return quantized
+        
+        elif A.ndim == 4:
+                s = time.time()
+                X, Y, Z, D = A.shape
+                
+                # Pre-reshape: Makes all Y-channels contiguous rows. Shape: [Y, X*Z*D]
+                A_reshaped = A.permute(1, 0, 2, 3).contiguous().reshape(Y, -1)
+
+                # Use the fast, parallel, per-channel k-means
+                quantized_channels = quantize_channels_parallel_kmeans(A_reshaped, num_signposts, iters)
+                
+                # quantized: [Y, X, Z, D] -> [X, Y, Z, D]
+                quantized = quantized_channels.reshape(Y, X, Z, D).permute(1, 0, 2, 3).contiguous()
+                
+                peak_mem = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0
+                return quantized

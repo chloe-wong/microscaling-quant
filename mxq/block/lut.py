@@ -11,16 +11,7 @@
     base           module whose quantize(V, fmt, axis, block_size) makes the codes: mxgemmini (default), mxquant, ...
     num_signposts  table entries per block (16 = 4-bit indices)
     iters          k-means iterations
-
-1. P, X = base.quantize(...): X = each block's scale, P = V / X rounded onto fmt's grid.
-2. Each block of P picks num_signposts centers by k-means (_lut/level2.py), snapped to E3M2_CODEBOOK.
-3. Each code in the block is replaced by its nearest center; P keeps V's shape.
-
-X is base's, unchanged: V_hat = dequantize(P, X) = P * expand(X), as for every block quantizer.
-Tables snap to E3M2 up to 14, so fmt must be MXFP6_E3M2 and base's codes within ±14 (not block.ocp).
-Needs a GPU (level2's layer counter divides by the device count).
-
-    python -m mxq.block.lut        one weight through FP6 and FP6 + LUT16/8/4
+    granularity    mx | channel 
 """
 from types import ModuleType
 import torch
@@ -31,13 +22,12 @@ from ..element_quant.formats import Format, get
 
 __all__ = ["quantize", "dequantize"]
 
-
 def quantize(V, fmt, axis=0, block_size=_driver.BLOCK, *,
-             base: ModuleType = mxgemmini, num_signposts=16, iters=3):
+             base: ModuleType = mxgemmini, num_signposts=16, iters=3, granularity='channel'):
     """base.quantize, then a num_signposts-entry table per block. Returns (P codes, X scales), float32."""
     P, X = base.quantize(V, fmt=fmt, axis=axis, block_size=block_size)
     b = _driver.to_blocks(P, axis, block_size)                                  
-    P_lut = _quantize_level2(b.data, num_signposts=num_signposts, iters=iters, group_size=block_size)
+    P_lut = _quantize_level2(b.data, num_signposts=num_signposts, iters=iters, group_size=block_size, granularity=granularity)
     return _driver.codes_from_blocks(P_lut, b), X                                
 
 

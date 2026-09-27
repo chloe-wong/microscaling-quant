@@ -6,7 +6,7 @@
     mxquant      scale_factor.mxquant + float_em grid=qtorch      MXQuant's simulation codes (all reported perplexities)
     mxgemmini    scale_factor.mxquant + float_em grid=ocp         MX-Gemmini's operand codes (== rtl_exact operands)
     ocp          scale_factor.ocp     + element_quant.microsoft   OCP MX v1.0 as Microsoft's microxcaling computes it
-    lut          mxgemmini (FP6 E3M2) + a k-means table per block  level-2 LUT codes; also encode() -> (I, T, X)
+    lut          any of the above + an mxq.lut table per block or channel   level-2 LUT codes
 
 `dequantize` is also exported from the package itself: putting the scales back is layout only, identical for
 every composition, so each one's dequantize is the same function under its own name.

@@ -1,10 +1,10 @@
-"""Mapping every value to its nearest signpost; per-channel (row) quantization."""
+"""fit: a table per row (k-means) and every value's index into it, batched over rows to fit in memory."""
 import torch
 
 from .kmeans import get_signposts_kMEANS_fp6_parallel
 
-def quantize_channels_parallel_kmeans(channels_batch, num_signposts, iters, chunk_size=8192, random_init=False):
-    """Optimized quantization with CHANNEL BATCHING for large inputs."""
+def fit(channels_batch, num_signposts=16, iters=3, chunk_size=8192, random_init=False):
+    """One num_signposts-entry table per row. Returns (I indices, T tables); the codes are T.gather(1, I)."""
     Y, N = channels_batch.shape
     
     needs_channel_batching = False
@@ -22,7 +22,7 @@ def quantize_channels_parallel_kmeans(channels_batch, num_signposts, iters, chun
             needs_channel_batching = batch_size < Y
    
     if needs_channel_batching:
-        all_quantized = []
+        all_indices, all_centers = [], []
         
         for ch_start in range(0, Y, batch_size):
             ch_end = min(ch_start + batch_size, Y)
@@ -32,29 +32,26 @@ def quantize_channels_parallel_kmeans(channels_batch, num_signposts, iters, chun
             # Get centers for this batch
             batch_centers = get_signposts_kMEANS_fp6_parallel(batch_data, num_signposts, iters, chunk_size, random_init)
             
-            # Quantize this batch
-            batch_quantized = _quantize_with_centers(batch_data, batch_centers, num_signposts)
+            # Assign this batch
+            batch_indices = _nearest(batch_data, batch_centers, num_signposts)
             
-            all_quantized.append(batch_quantized)
+            all_indices.append(batch_indices)
+            all_centers.append(batch_centers)
             
-            del batch_data, batch_centers, batch_quantized
+            del batch_data, batch_centers, batch_indices
             # Only clear cache between channel batches (not inside loops)
             if torch.cuda.is_available() and (ch_end - ch_start) > 512:
                 torch.cuda.empty_cache()
         
-        quantized_output = torch.cat(all_quantized, dim=0)
-        del all_quantized
-        return quantized_output
+        return torch.cat(all_indices, dim=0), torch.cat(all_centers, dim=0)
     
     # Standard path: no channel batching needed
     centers = get_signposts_kMEANS_fp6_parallel(channels_batch, num_signposts, iters, chunk_size, random_init)
-    quantized_output = _quantize_with_centers(channels_batch, centers, num_signposts)
-    
-    return quantized_output
+    return _nearest(channels_batch, centers, num_signposts), centers
 
 
-def _quantize_with_centers(channels_batch, centers, num_signposts):
-    """Helper to quantize given pre-computed centers."""
+def _nearest(channels_batch, centers, num_signposts):
+    """Index of each value's nearest center in its row."""
     Y, N = channels_batch.shape
     dist_mem_bytes = Y * N * num_signposts * 4
     
@@ -97,10 +94,8 @@ def _quantize_with_centers(channels_batch, centers, num_signposts):
             
             try:
                 dist = (chunk.unsqueeze(2) - chunk_centers.unsqueeze(1)).abs()
-                closest = dist.argmin(dim=2)
-                q_chunk = torch.gather(chunk_centers, 1, closest)
-                quantized_chunks.append(q_chunk)
-                del dist, closest
+                quantized_chunks.append(dist.argmin(dim=2))
+                del dist
             except RuntimeError as e:
                 if "out of memory" in str(e):
                     # print(f"[Emergency] OOM, row-by-row fallback")
@@ -110,10 +105,8 @@ def _quantize_with_centers(channels_batch, centers, num_signposts):
                         row = chunk[row_idx:row_idx+1]
                         row_centers = chunk_centers[row_idx:row_idx+1]
                         dist_row = (row.unsqueeze(2) - row_centers.unsqueeze(1)).abs()
-                        closest_row = dist_row.argmin(dim=2)
-                        q_row = torch.gather(row_centers, 1, closest_row)
-                        q_chunk_list.append(q_row)
-                        del row, row_centers, dist_row, closest_row
+                        q_chunk_list.append(dist_row.argmin(dim=2))
+                        del row, row_centers, dist_row
                         
                     q_chunk = torch.cat(q_chunk_list, dim=0)
                     quantized_chunks.append(q_chunk)
@@ -128,8 +121,7 @@ def _quantize_with_centers(channels_batch, centers, num_signposts):
         del quantized_chunks
     else:
         dist = (channels_batch.unsqueeze(2) - centers.unsqueeze(1)).abs()
-        closest = dist.argmin(dim=2)
-        quantized_output = torch.gather(centers, 1, closest)
-        del dist, closest
+        quantized_output = dist.argmin(dim=2)
+        del dist
     
     return quantized_output

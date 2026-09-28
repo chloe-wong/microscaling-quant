@@ -34,18 +34,24 @@ def load_model(model_id, seqlen):
 
 
 def load_samples(model_id, seqlen, nsamples, seed):
+    """`nsamples` windows of `seqlen` tokens of the WikiText-2 test split: drawn at random by `seed` (MXQuant's
+    protocol), or the first `nsamples` in order when `seed` is None; `nsamples=0` is every window. The per-window
+    perplexity of TinyLlama at 2048 ranges from 4 to 18, so which windows are averaged moves a 16-window
+    number by about +-0.8; the whole split (165 windows) is the number to quote."""
     from datasets import load_dataset
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    data = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    data = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
     text = "\n\n".join([x for x in data["text"] if x.strip()])
     ids = tokenizer(text, return_tensors="pt")["input_ids"][0]
     nbatch = ids.numel() // seqlen
     ids = ids[:nbatch * seqlen].reshape(nbatch, seqlen)
+    if nsamples == 0 or nsamples >= nbatch:
+        return ids
+    if seed is None:
+        return ids[:nsamples]
     torch.manual_seed(seed)
-    if nsamples < nbatch:
-        ids = ids[torch.randperm(nbatch)[:nsamples]]
-    return ids
+    return ids[torch.randperm(nbatch)[:nsamples]]
 
 
 @torch.no_grad()
@@ -86,8 +92,9 @@ def main():
     ap.add_argument("--rules", required=True, help="a key of experiments.recipes.RULES")
     ap.add_argument("--model-id", default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     ap.add_argument("--seqlen", type=int, default=2048)
-    ap.add_argument("--nsamples", type=int, default=16)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--nsamples", type=int, default=16, help="windows of seqlen tokens; 0 = the whole test split")
+    ap.add_argument("--seed", type=int, default=0, help="which windows (MXQuant's protocol)")
+    ap.add_argument("--sequential", action="store_true", help="the first nsamples windows in order instead of seeded ones")
     ap.add_argument("--chunk", type=int, default=None, help="token rows per reducer call (default: by output width)")
     ap.add_argument("--gpus", default=None, help="e.g. 0,1,2,3: one worker per GPU, samples split between them")
     ap.add_argument("--samples", default=None, help="worker only: START:END sample indices")
@@ -105,9 +112,11 @@ def main():
     out = Path(args.out or REPO / "experiments" / "results" / f"{args.rules}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    seed = None if args.sequential else args.seed
     if args.gpus and "," in args.gpus and not args.samples:            # launcher: one worker per GPU
         gpus = args.gpus.split(",")
-        bounds = [round(i * args.nsamples / len(gpus)) for i in range(len(gpus) + 1)]
+        total = load_samples(args.model_id, args.seqlen, args.nsamples, seed).shape[0]
+        bounds = [round(i * total / len(gpus)) for i in range(len(gpus) + 1)]
         parts, procs = [], []
         for g, lo, hi in zip(gpus, bounds, bounds[1:]):
             if lo == hi:                                           # fewer samples than GPUs: nothing to do
@@ -116,6 +125,8 @@ def main():
             parts.append(part)
             cmd = [sys.executable, __file__, "--rules", args.rules, "--model-id", args.model_id, "--seqlen", str(args.seqlen),
                    "--nsamples", str(args.nsamples), "--seed", str(args.seed), "--samples", f"{lo}:{hi}", "--out", str(part)]
+            if args.sequential:
+                cmd += ["--sequential"]
             if args.chunk:
                 cmd += ["--chunk", str(args.chunk)]
             if args.no_cache_weights:
@@ -129,7 +140,7 @@ def main():
         for p in parts:
             p.unlink()
     else:
-        ids = load_samples(args.model_id, args.seqlen, args.nsamples, args.seed)
+        ids = load_samples(args.model_id, args.seqlen, args.nsamples, seed)
         lo, hi = (int(v) for v in args.samples.split(":")) if args.samples else (0, ids.shape[0])
         hi = min(hi, ids.shape[0])                                 # asking for more samples than the data has
         model = load_model(args.model_id, args.seqlen)
@@ -147,7 +158,7 @@ def main():
             print(f"  [{args.rules}] sample {i + 1}/{ids.shape[0]}  nll/token {nll / n:.6f}  {time.time() - t0:.0f}s", flush=True)
         schemes = {s.name: describe(s) for _, s in (rules or []) if s is not None}
         rule_list = [[describe(sel), None if s is None else s.name] for sel, s in (rules or [])]
-        record = {"rules": args.rules, "model": args.model_id, "seqlen": args.seqlen, "nsamples": args.nsamples, "seed": args.seed,
+        record = {"rules": args.rules, "model": args.model_id, "seqlen": args.seqlen, "nsamples": args.nsamples, "seed": seed,
                   "mxq_commit": commit(), "rule_list": rule_list, "schemes": schemes, "layers": table,
                   "per_sample": per_sample, "seconds": time.time() - t0}
 

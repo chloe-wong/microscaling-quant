@@ -80,7 +80,7 @@ S = float_em.quantize(S, 8, 7, rounding_mode="rne", grid="ieee")   # bf16, as th
 
 | stage | `MXQUANT(prod_e, prod_m)` | `MXGEMMINI()` |
 |---|---|---|
-| product | fp32 multiply, then `float_em` ties-away on the qtorch grid to float(prod_e, prod_m) | `arith.truncate_significand` to prod_m fraction bits (no exponent clamp), then `arith.saturate_product` (448 for e4m3) |
+| product | fp32 multiply, then `float_em` ties-away on the qtorch grid to float(prod_e, prod_m) | `arith.truncate_significand` to prod_m fraction bits (flushed below 2^-16), then `arith.saturate_product` (448 for e4m3) |
 | accumulate into lane float(e, m) | fp32 add, then `float_em` ties-away on the qtorch grid | both addends `float_em` RNE on the ieee grid, then `arith.exact_add` (exact sum, one RNE rounding) |
 | add finished block into output | fp32 add, no rounding | both rounded RNE to bf16, then `arith.exact_add` to bf16 |
 | matches | MXQuant `MXLinearSim._simulate_atw`, bit-identical | `rtl_exact` hardware output `Y_hw` and the gemmini golden model, bit-identical |

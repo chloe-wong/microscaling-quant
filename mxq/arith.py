@@ -3,6 +3,7 @@ Bit-identical to the gemmini golden (`fp8_matmul_model.py`) functions named in e
 
     exact_add(a, b, e, m)         a + b exactly, then one rounding to float(e, m)        golden fp_add_exact, bf16_accum_add
     truncate_significand(x, m)    keep m fraction bits of |x|'s significand, drop the rest golden mx_product_quantize_trunc, step 1
+    flush_product(x, floor_exp)   zero a product below 2^floor_exp                        MxFPMul PROD_FLOOR
     saturate_product(x, e, m)     clamp a product to the PE's largest float(e, m) value   golden mx_product_saturate
 """
 import torch
@@ -10,7 +11,7 @@ import torch
 from . import rounding
 from .element_quant import float_em
 
-__all__ = ["exact_add", "truncate_significand", "saturate_product"]
+__all__ = ["exact_add", "truncate_significand", "flush_product", "saturate_product"]
 
 
 def _fits_float32(e: int, m: int) -> bool:
@@ -110,6 +111,12 @@ def truncate_significand(x: torch.Tensor, m: int) -> torch.Tensor:
     k = rounding.round_int(mant * (1 << (m + 1)), "truncate")            # significand with m fraction bits, exact
     t = torch.ldexp(k / (1 << m), ex - 1)                                # back to the value
     return torch.where(nz, torch.copysign(t, x), x)
+
+
+def flush_product(x: torch.Tensor, floor_exp: int) -> torch.Tensor:
+    """Zero a product below 2^floor_exp (MxFPMul PROD_FLOOR, 2^-16 for the (4, 3) product)."""
+    x = x.to(torch.float32)
+    return torch.where(x.abs() < 2.0 ** floor_exp, torch.zeros_like(x), x)
 
 
 def saturate_product(x: torch.Tensor, e: int, m: int) -> torch.Tensor:

@@ -22,7 +22,7 @@ output was computed from. With rounding_mode="rne", scale_floor=HARDWARE_FLOOR: 
 end_to_end_linear `quantize_mx_block32(round_mode="even")` bit for bit on every format
 (npu-exploration tests/selftest_block.py).
 """
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 
@@ -36,12 +36,27 @@ __all__ = ["quantize", "dequantize"]
 
 def quantize(V: torch.Tensor, fmt: Union[str, Format], axis: int = 0, block_size: int = _driver.BLOCK,
              rounding_mode: str = "ties_away",
-             scale_floor: float = scale_factor.MXQUANT_FLOOR) -> Tuple[torch.Tensor, torch.Tensor]:
-    """MX-Gemmini block quantize V along `axis`. Returns (P codes, X power-of-two scales), float32."""
+             scale_floor: float = scale_factor.MXQUANT_FLOOR,
+             via: Optional[Tuple[int, int]] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    """MX-Gemmini block quantize V along `axis`. Returns (P codes, X power-of-two scales), float32.
+
+    `via=(e, m)`: the scaled value is first rounded to float(e, m) on the IEEE grid (subnormals, no saturation)
+    with the same rounding mode, then to the format. MX-Gemmini's fp4 REQUANTIZER rounds the bf16 accumulator
+    bf16 -> E3M1 -> E2M1 (BF16ScaleRoundToTiny), so `fmt="MXFP4", rounding_mode="rne", via=(3, 1)` is that
+    requantizer; the single rounding differs from it on about one value in seven. Measured against
+    npu-exploration rtl_exact/mxmesh/fp4.py::matrix_mx_requantize: identical on every finite block whose max
+    is at least 2^-126 (E8M0's smallest scale); below that the hardware's scale underflows to zero and the
+    block reads as zero, which this does not reproduce."""
     f = get(fmt)
+
+    def elem(z: torch.Tensor) -> torch.Tensor:
+        if via is not None:
+            z = float_em.quantize(z, via[0], via[1], rounding_mode=rounding_mode, grid="ieee")
+        return float_em.quantize(z, f.e, f.m, rounding_mode=rounding_mode, grid="ocp")
+
     return _driver.quantize(V, axis, block_size, passthrough=f is None,
                             scale=lambda amax: scale_factor.mxquant(amax, scale_floor),                                   # step 1
-                            elem=lambda z: float_em.quantize(z, f.e, f.m, rounding_mode=rounding_mode, grid="ocp"))  # step 2
+                            elem=elem)                                                                                    # step 2
 
 
 def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = _driver.BLOCK) -> torch.Tensor:

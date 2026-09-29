@@ -3,28 +3,38 @@
 Both rules take the block's max |value| (any shape, computed by the caller) and return a
 power-of-two scale of the same shape and dtype.
 
-    mxquant(amax)      X = 2^floor(log2 amax)             block max lands in [1, 2)
-    ocp(amax, emax)    X = 2^(floor(log2 amax) - emax)    block max lands in the format's top binade
+    mxquant(amax, floor)   X = 2^floor(log2 max(amax, floor))     block max lands in [1, 2)
+    ocp(amax, emax)        X = 2^(floor(log2 amax) - emax)         block max lands in the format's top binade
 
 mxquant is the rule used by MXQuant's linear-layer simulation and by the MX-Gemmini RTL and
-spike (gemmini 0b2cc2c and later: log2_pmax = 0). ocp is the OCP Microscaling v1.0 rule as implemented in Microsoft's
-microxcaling `_quantize_mx` (see mxq/microxcaling/blockwise.py), including its E8M0 range handling.
+spike (gemmini 0b2cc2c and later: log2_pmax = 0). `floor` is the smallest block max a scale is
+computed from; it matters only for all-zero or tiny blocks, and MXQuant's two quantizers disagree:
+
+    MXQUANT_FLOOR   1e-38   linear_e2e_wrap/eval_mx_linear_e2e.py::mx_block32_quantize (the simulation; default)
+    HARDWARE_FLOOR  2^-23   end_to_end_linear/mx_block_quant.py::_po2 (torch.finfo(float32).eps) and the
+                            MX-Gemmini requantizer (mx_fp_math.h: max(amax, FLT_EPSILON)) -- the hardware
+
+ocp is the OCP Microscaling v1.0 rule as implemented in Microsoft's microxcaling `_quantize_mx`
+(see mxq/microxcaling/blockwise.py), including its E8M0 range handling.
 """
 import torch
 
 from .microxcaling.formats import FP32_MIN_NORMAL
 
-__all__ = ["mxquant", "ocp"]
+__all__ = ["mxquant", "ocp", "MXQUANT_FLOOR", "HARDWARE_FLOOR"]
 
 #: floor used by MXQuant's `mx_block32_quantize` so a zero block gets a finite scale.
-_MXQUANT_FLOOR = 1e-38
+MXQUANT_FLOOR = 1e-38
+#: floor used by MXQuant's end_to_end_linear quantizer and by the MX-Gemmini requantizer (FLT_EPSILON).
+HARDWARE_FLOOR = 2.0 ** -23
+_MXQUANT_FLOOR = MXQUANT_FLOOR
 
 
-def mxquant(amax: torch.Tensor) -> torch.Tensor:
-    """MXQuant scale: 2^floor(log2 amax), floored at 1e-38 (verbatim numerics of
-    linear_e2e_wrap/eval_mx_linear_e2e.py::mx_block32_quantize)."""
-    sc = torch.pow(2.0, torch.floor(torch.log2(amax.clamp(min=_MXQUANT_FLOOR))))
-    return sc.clamp(min=_MXQUANT_FLOOR)
+def mxquant(amax: torch.Tensor, floor: float = MXQUANT_FLOOR) -> torch.Tensor:
+    """MXQuant scale: 2^floor(log2 max(amax, floor)), floored at `floor` (with the default, the verbatim
+    numerics of linear_e2e_wrap/eval_mx_linear_e2e.py::mx_block32_quantize)."""
+    sc = torch.pow(2.0, torch.floor(torch.log2(amax.clamp(min=floor))))
+    return sc.clamp(min=floor)
 
 
 def ocp(amax: torch.Tensor, emax: int, scale_bits: int = 8) -> torch.Tensor:

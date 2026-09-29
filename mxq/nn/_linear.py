@@ -30,7 +30,8 @@ ELEMENTS_PER_STEP = 3_000_000
 
 
 class MXLinear(nn.Module):
-    def __init__(self, linear: nn.Linear, scheme: Scheme, chunk: Optional[int] = None):
+    def __init__(self, linear: nn.Linear, scheme: Scheme, chunk: Optional[int] = None,
+                 cache_weights: bool = True):
         super().__init__()
         if chunk is not None and chunk < 1:
             raise ValueError(f"chunk must be >= 1, got {chunk}")
@@ -39,21 +40,28 @@ class MXLinear(nn.Module):
         self.bias = linear.bias
         self.scheme = scheme
         self.chunk = chunk
+        self.cache_weights = cache_weights
         self.register_buffer("P_W", None, persistent=False)
         self.register_buffer("X_W", None, persistent=False)
-        self.refresh()
+        if cache_weights:
+            self.refresh()
 
     @torch.no_grad()
     def refresh(self) -> None:
         """Recompute the cached weight codes and scales from `weight`."""
-        self.P_W, self.X_W = self.scheme.b(self.weight.detach().float().t().contiguous())     # B = Wᵀ, K×N
+        self.P_W, self.X_W = self._codes()
+
+    @torch.no_grad()
+    def _codes(self):
+        return self.scheme.b(self.weight.detach().float().t().contiguous())                   # B = Wᵀ, K×N
 
     @torch.no_grad()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shape = x.shape
         flat = x.reshape(-1, shape[-1]).float()                                               # M×K
         step = self.chunk or max(1, ELEMENTS_PER_STEP // self.out_features)
-        rows = [self.scheme.reduce(*self.scheme.a(part.t().contiguous()), self.P_W, self.X_W)  # A = xᵀ, K×m
+        P_W, X_W = (self.P_W, self.X_W) if self.cache_weights else self._codes()
+        rows = [self.scheme.reduce(*self.scheme.a(part.t().contiguous()), P_W, X_W)           # A = xᵀ, K×m
                 for part in flat.split(step)]
         Y = rows[0] if len(rows) == 1 else torch.cat(rows)                                    # M×N
         if self.bias is not None:

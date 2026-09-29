@@ -71,7 +71,8 @@ class Handle:
         return "\n".join(lines)
 
 
-def patch(model: nn.Module, rules: Sequence[Rule], chunk: Optional[int] = None, dry_run: bool = False) -> Handle:
+def patch(model: nn.Module, rules: Sequence[Rule], chunk: Optional[int] = None, dry_run: bool = False,
+          cache_weights: bool = True) -> Handle:
     for i, rule in enumerate(rules):
         if len(rule) != 2 or not (rule[1] is None or isinstance(rule[1], Scheme)):
             raise ValueError(f"rule {i} must be (selector, Scheme or None), got {rule!r}")
@@ -116,7 +117,7 @@ def patch(model: nn.Module, rules: Sequence[Rule], chunk: Optional[int] = None, 
             if hit is None or rules[hit][1] is None:
                 continue
             leaf = name.rpartition(".")[2]
-            setattr(parent, leaf, MXLinear(module, rules[hit][1], chunk))
+            setattr(parent, leaf, MXLinear(module, rules[hit][1], chunk, cache_weights))
             replaced.append((parent, leaf, module))
     handle = Handle(model, table, replaced)
     if dry_run:

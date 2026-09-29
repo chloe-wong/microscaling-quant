@@ -10,7 +10,7 @@ rule is written in this file. Stage by stage:
 
     stage                 MXQUANT(prod_e, prod_m)                          MXGEMMINI(prod_e=4, prod_m=3)
     product(a, b)         fp32 a*b, then float_em ties_away on the         arith.truncate_significand to prod_m fraction
-                          qtorch grid to float(prod_e, prod_m)             bits (no exponent clamp), then arith.saturate_product
+                          qtorch grid to float(prod_e, prod_m)             bits (flushed below 2^-16), then arith.saturate_product
                                                                            (448 for e4m3)
     acc_add(S, p, e, m)   fp32 S+p, then float_em ties_away on the         S and p each rounded rne on the ieee grid to
                           qtorch grid to float(e, m)                       float(e, m); arith.exact_add: exact sum, one rne
@@ -29,7 +29,7 @@ from typing import Callable, Optional, Sequence, Tuple
 
 import torch
 
-from .. import arith
+from .. import arith, rounding
 from ..element_quant import float_em
 
 __all__ = ["Arithmetic", "MXQUANT", "MXGEMMINI", "compiled"]
@@ -63,17 +63,46 @@ def MXQUANT(prod_e: int, prod_m: int) -> Arithmetic:
     )
 
 
-def MXGEMMINI(prod_e: int = 4, prod_m: int = 3) -> Arithmetic:
+_U32 = 0xFFFFFFFF
+
+
+def _bf16_rne(x: torch.Tensor) -> torch.Tensor:
+    """Round float32 to the bf16 grid, nearest-even, on the bit pattern: (bits + 0x7FFF + lsb) & ~0xFFFF.
+
+    This is the one lane rounding not done by float_em's scaled-integer grid. That grid runs in float64 for
+    e = 8 because bf16's subnormal step, 2^-133, is itself a float32 subnormal that fused kernels flush; the
+    bit form needs no float arithmetic at all, so it is exact on subnormals (bf16 shares float32's emin, so
+    the uniform bit-add IS the grid), rounds the largest finite values into 0x7F800000 = Inf as IEEE does,
+    keeps the sign of +-0, and passes NaN through unchanged. It is the same primitive the qtorch grid uses.
+
+    NOT `x.to(bfloat16).to(float32)`: exact in eager, but torch.compile folds that cast pair away inside a
+    fused kernel and the value comes back unrounded (2499980 of 3500168 corpus values). On schedule.HW_FINAL
+    nothing that reaches a bf16 rounding is ever off the bf16 grid, so every gate passed with the cast; a
+    ladder whose window ends in float32 showed it. `torch._inductor.config.emulate_precision_casts` does not
+    prevent the fold. The gate's tier 1 now runs every stage compiled as well as eager for this reason.
+    """
+    x32 = x.to(torch.float32).contiguous()
+    bits = x32.view(torch.int32).to(torch.int64) & _U32
+    q = rounding.round_bits(bits, 7, "rne")
+    q = torch.where(q >= 1 << 31, q - (1 << 32), q).to(torch.int32).view(torch.float32)
+    return torch.where(torch.isnan(x32), x32, q)
+
+
+def MXGEMMINI(prod_e: int = 4, prod_m: int = 3, prod_floor: Optional[int] = -16) -> Arithmetic:
     """MX-Gemmini PE column (npu-exploration/rtl_exact, gemmini golden fp8_matmul_model.py):
-    product significand truncated to prod_m bits, no exponent clamp, then PE saturation (`mx_product_quantize_trunc`);
+    product significand truncated to prod_m bits, flushed below 2^prod_floor, then PE saturation (`mx_product_quantize_trunc`);
     both addends rounded RNE to the lane's float(e, m), added exactly, rounded once (`fp_add_exact(fp_quantize_rne, fp_quantize_rne)`);
     cross-block: both rounded to bf16, added exactly, rounded to bf16 (`bf16_accum_add(C, q_bf16_rne(tile))`).
+    The bf16 roundings are done on the bit pattern, `_bf16_rne` above: 2.98x on an all-bf16 ladder, 1.23x on
+    schedule.HW_FINAL against the float64 grid, bit-identical, and safe under torch.compile.
     Validated against hardware for MXFP8_E4M3 operands with the default prod (4, 3) and schedule.HW_FINAL only;
     other operand formats or prod widths run the same stages unchecked."""
-    lane = lambda x, e, m: float_em.quantize(x, e, m, rounding_mode="rne", grid="ieee")
+    lane = lambda x, e, m: (_bf16_rne(x) if (e, m) == (8, 7)
+                            else float_em.quantize(x, e, m, rounding_mode="rne", grid="ieee"))
+    flush = (lambda x: x) if prod_floor is None else (lambda x: arith.flush_product(x, prod_floor))
     return Arithmetic(
         name=f"mxgemmini(prod=e{prod_e}m{prod_m})",
-        product=lambda a, b: arith.saturate_product(arith.truncate_significand(a * b, prod_m), prod_e, prod_m),
+        product=lambda a, b: arith.saturate_product(flush(arith.truncate_significand(a * b, prod_m)), prod_e, prod_m),
         acc_add=lambda S, p, e, m: arith.exact_add(lane(S, e, m), lane(p, e, m), e, m),
         tile_add=lambda C, tile: arith.exact_add(lane(C, 8, 7), lane(tile, 8, 7), 8, 7),
     )

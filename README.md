@@ -42,6 +42,7 @@ P_B, X_B = block.mxgemmini.quantize(W.t(), "MXFP8_E4M3", axis=0)      # B = Wᵀ
 Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), schedule.HW_FINAL)    # M×N, bit-identical to MX-Gemmini
 Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXQUANT(4, 3), schedule.HW_FINAL)  # MXQuant's simulation
 Y = matmul.anchor_tree(P_A, X_A, P_B, X_B, matmul.MXGEMMINI())                    # MxGen's anchor tree, bf16 out
+Y = matmul.adder_tree(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), [(4, 4), (4, 5), (4, 6), (8, 7)])   # one format per level
 Y = fp64_accum(P_A, X_A, P_B, X_B)                                                 # same codes, no rounding inside the multiply
 ```
 
@@ -123,6 +124,7 @@ mxq/
     _arithmetic.py   Arithmetic(product, acc_add, tile_add); MXQUANT(prod_e, prod_m) and MXGEMMINI(): the datapaths, stage by stage
     _systolic.py     the PE column (`size` deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate
     _anchor.py       MxGen's anchor tree: align to one anchor, integer adds, one rounding per tree; `width`, per-level `bits`
+    _adder.py        an adder tree: log2(size) levels of pairwise acc_add, one float(e, m) per level; the tree is not RTL-checked
     _common.py       operand shape, dtype and device checks, schedule length check, per-block scale map
   _fp64_accum.py     fp64_accum: the same codes with no rounding inside the multiply, the error floor; not an architecture
   schedule.py        one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL; exactly rows entries or ValueError

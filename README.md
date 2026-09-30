@@ -68,6 +68,22 @@ handle = patch(model, rules)             # replace the chosen layers with mxq.nn
 handle.revert()                          # put the originals back
 ```
 
+From TorchAO or Hugging Face (`pip install -e ".[torchao]"`): the same MXLinear behind `torchao.quantize_`, for tools
+that only accept a TorchAO config (Model2MLIR, `transformers.TorchAoConfig`, lm-eval). The config is plain fields
+(defaults: the MX-Gemmini tapeout), so it can go into a checkpoint's config.json; `patch` stays the primary API.
+
+```python
+from torchao.core.config import config_to_dict
+from torchao.quantization import quantize_
+from transformers import AutoModelForCausalLM, TorchAoConfig
+from mxq.nn.torchao import MXQConfig
+
+cfg = MXQConfig(fmt="MXFP8_E4M3")                 # rounding, scale floor, product, ladder, window: see the class
+quantize_(model, cfg)                             # every nn.Linear, changed in place
+model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=TorchAoConfig(cfg))   # HF skips lm_head
+cfg2 = MXQConfig.from_dict(config_to_dict(cfg))   # torchao's own config_from_dict cannot find classes outside torchao
+```
+
 Product / accumulator quantization to any float(e, m):
 
 ```python
@@ -112,6 +128,7 @@ mxq/
   nn/                putting Schemes into a model
     _linear.py       MXLinear: one nn.Linear through one Scheme; weight codes cached, token rows chunked (bit-identical)
     _patch.py        patch(model, rules): a Scheme per layer name or layer type, first match wins; dry_run, revert
+    torchao.py       MXQConfig: the same MXLinear behind torchao.quantize_ (optional, needs torchao)
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
 ```
 

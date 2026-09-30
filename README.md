@@ -78,7 +78,7 @@ from torchao.quantization import quantize_
 from transformers import AutoModelForCausalLM, TorchAoConfig
 from mxq.nn.torchao import MXQConfig
 
-cfg = MXQConfig(fmt="MXFP8_E4M3")                 # rounding, scale floor, product, ladder, window: see the class
+cfg = MXQConfig(fmt="MXFP8_E4M3")                 # rounding, scale floor, product, ladder, size: see the class
 quantize_(model, cfg)                             # every nn.Linear, changed in place
 model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=TorchAoConfig(cfg))   # HF skips lm_head
 cfg2 = MXQConfig.from_dict(config_to_dict(cfg))   # torchao's own config_from_dict cannot find classes outside torchao
@@ -120,7 +120,7 @@ mxq/
   arith.py           exact_add, truncate_significand, saturate_product: what a PE does between quantizations
   matmul/            the array dataflows: Y = Aᵀ·B from codes and scales, summed in the hardware's order
     _arithmetic.py   Arithmetic(product, acc_add, tile_add); MXQUANT(prod_e, prod_m) and MXGEMMINI(): the datapaths, stage by stage
-    _systolic.py     the PE column (window deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate
+    _systolic.py     the PE column (`size` deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate
     _common.py       operand shape, dtype and device checks, schedule length check, per-block scale map
   _fp64_accum.py     fp64_accum: the same codes with no rounding inside the multiply, the error floor; not an architecture
   schedule.py        one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL; exactly rows entries or ValueError

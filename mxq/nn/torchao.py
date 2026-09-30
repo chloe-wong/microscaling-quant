@@ -1,7 +1,7 @@
 """mxq.nn.torchao — the same MXLinear behind TorchAO's `quantize_`, for callers that only speak TorchAO.
 
     from mxq.nn.torchao import MXQConfig
-    cfg = MXQConfig(fmt="MXFP8_E4M3", prod=[4, 3], prod_floor=-16, ladder=[[4, 4]] * 8 + ..., window=16)
+    cfg = MXQConfig(fmt="MXFP8_E4M3", prod=[4, 3], prod_floor=-16, ladder=[[4, 4]] * 8 + ..., size=16)
     quantize_(model, cfg)                                                            # torchao
     AutoModelForCausalLM.from_pretrained(id, quantization_config=TorchAoConfig(cfg))  # Hugging Face
 
@@ -42,11 +42,11 @@ REDUCERS = ("hardware", "exact")
 @dataclass
 class MXQConfig(AOBaseConfig):
     """One Scheme as plain fields. Defaults are the MX-Gemmini tapeout: RNE, the 2^-23 block-max floor, E4M3
-    products flushed below 2^-16, the HW_FINAL lane ladder, a 16-deep window.
+    products flushed below 2^-16, the HW_FINAL lane ladder, a 16-deep column (size).
 
     fmt, rounding_mode, scale_floor, via, block_size   -> block.mxgemmini.quantize (both operands)
     prod, prod_floor                                   -> matmul.MXGEMMINI(prod_e, prod_m, prod_floor)
-    ladder, window                                     -> matmul.systolic(schedule=ladder, window=window)
+    ladder, size                                       -> matmul.systolic(schedule=ladder, size=size)
     reduce       "hardware": the systolic column above; "exact": fp64_accum (same codes, no rounding inside)
     compiled     matmul.compiled on the Arithmetic (GPU; bit-identical to eager)
     chunk        MXLinear's token chunk (None: its default)
@@ -59,7 +59,7 @@ class MXQConfig(AOBaseConfig):
     prod: List[int] = field(default_factory=lambda: [4, 3])
     prod_floor: Optional[int] = -16
     ladder: List[List[int]] = field(default_factory=lambda: [list(e) for e in HW_FINAL])
-    window: int = 16
+    size: int = 16
     reduce: str = "hardware"
     compiled: bool = False
     chunk: Optional[int] = None
@@ -74,13 +74,13 @@ class MXQConfig(AOBaseConfig):
         self.ladder = [_pair(e, f"ladder[{i}]") for i, e in enumerate(self.ladder)]
         if self.via is not None:
             self.via = _pair(self.via, "via")
-        if len(self.ladder) != self.window:
-            raise ValueError(f"MXQConfig: ladder has {len(self.ladder)} lanes for a {self.window}-deep window "
+        if len(self.ladder) != self.size:
+            raise ValueError(f"MXQConfig: ladder has {len(self.ladder)} lanes for a {self.size}-deep column "
                              "(one accumulator format per lane)")
         if self.prod_floor is not None and not _is_int(self.prod_floor):
             raise ValueError(f"MXQConfig: prod_floor {self.prod_floor!r} must be an integer exponent or None")
-        if not _is_int(self.block_size) or self.block_size < 1 or self.block_size % self.window:
-            raise ValueError(f"MXQConfig: block_size {self.block_size!r} must be a multiple of window {self.window}")
+        if not _is_int(self.block_size) or self.block_size < 1 or self.block_size % self.size:
+            raise ValueError(f"MXQConfig: block_size {self.block_size!r} must be a multiple of size {self.size}")
         if self.chunk is not None and (not _is_int(self.chunk) or self.chunk < 1):
             raise ValueError(f"MXQConfig: chunk {self.chunk!r} must be a positive integer or None")
 
@@ -98,7 +98,7 @@ class MXQConfig(AOBaseConfig):
             if self.compiled:
                 arith = matmul.compiled(arith)
             r = partial(matmul.systolic, arith=arith, schedule=[tuple(e) for e in self.ladder],
-                        window=self.window, block_size=self.block_size)
+                        size=self.size, block_size=self.block_size)
         else:
             r = partial(fp64_accum, block_size=self.block_size)
         s = Scheme(self.name, a=q, b=q, reduce=r)

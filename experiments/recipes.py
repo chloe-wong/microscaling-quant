@@ -25,7 +25,7 @@ The configuration, value by value, and where each value comes from:
                       Gemmini PE column (bf16_accum_add)
     accumulator ladder  16 lanes: 8x e4m4, 2x e4m5, 5x e4m6, 1x bf16
                       the tapeout's choice
-    window            16 deep, inside blocks of 32
+    size              16 products per reduction (the column depth), inside blocks of 32
                       Gemmini
     layers            every nn.Linear except the attention projections; lm_head IS quantized
                       MXQuant, complete_integration_e2e/eval_complete.py

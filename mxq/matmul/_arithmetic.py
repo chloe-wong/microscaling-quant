@@ -43,12 +43,12 @@ class Arithmetic:
     product: Callable[[Tensor, Tensor], Tensor]
     acc_add: Callable[[Tensor, Tensor, int, int], Tensor]
     tile_add: Callable[[Tensor, Tensor], Tensor]
-    #: optional: given a schedule and a window depth, return one function that does a whole window of
+    #: optional: given a schedule and a reduction size, return one function that does a whole reduction of
     #: products and accumulations. Same operations in the same order as calling product and acc_add step by
     #: step; it exists only so the three stages can be fused into one GPU kernel. A reducer uses it when it
-    #: has a full window and falls back to the stages otherwise. `compiled` below sets it; a plain
+    #: has a full reduction and falls back to the stages otherwise. `compiled` below sets it; a plain
     #: Arithmetic leaves it None and nothing changes.
-    fused_window: Optional[Callable[[Sequence[Tuple[int, int]], int], Callable]] = None
+    fused_reduction: Optional[Callable[[Sequence[Tuple[int, int]], int], Callable]] = None
 
 
 def MXQUANT(prod_e: int, prod_m: int) -> Arithmetic:
@@ -78,7 +78,7 @@ def _bf16_rne(x: torch.Tensor) -> torch.Tensor:
     NOT `x.to(bfloat16).to(float32)`: exact in eager, but torch.compile folds that cast pair away inside a
     fused kernel and the value comes back unrounded (2499980 of 3500168 corpus values). On schedule.HW_FINAL
     nothing that reaches a bf16 rounding is ever off the bf16 grid, so every gate passed with the cast; a
-    ladder whose window ends in float32 showed it. `torch._inductor.config.emulate_precision_casts` does not
+    ladder whose reduction ends in float32 showed it. `torch._inductor.config.emulate_precision_casts` does not
     prevent the fold. The gate's tier 1 now runs every stage compiled as well as eager for this reason.
     """
     x32 = x.to(torch.float32).contiguous()
@@ -114,25 +114,25 @@ def compiled(arith: Arithmetic) -> Arithmetic:
     bit-identical; this is checked, not assumed (tests compare it with the uncompiled one bit for bit, including
     subnormal, Inf, NaN and saturating inputs). Needs a GPU with Triton; the first call of each shape compiles."""
     import torch._dynamo
-    torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 512)   # one entry per shape, lane and window
+    torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 512)   # one entry per shape, lane and size
     c = lambda f: torch.compile(f, dynamic=False)
     cache: dict = {}
 
-    def fused_window(schedule, window: int):
-        """One compiled function for a whole window, built once per (schedule, window) and reused.
+    def fused_reduction(schedule, size: int):
+        """One compiled function for a whole reduction, built once per (schedule, size) and reused.
 
         A step of the loop launches its own kernels, about nine of them, and a single layer at 2048 tokens
         runs tens of thousands of steps, so the loop is bound by launch overhead rather than by arithmetic.
-        The window depth is a constant, so the compiler unrolls the whole window into one graph and fuses
+        The size is a constant, so the compiler unrolls the whole reduction into one graph and fuses
         across it. Nothing about the order or the rounding changes."""
-        key = (tuple(tuple(t) for t in schedule), window)
+        key = (tuple(tuple(t) for t in schedule), size)
         if key not in cache:
             sched = list(key[0])
 
             def body(A, B):
-                """A: window x M codes, B: window x N codes -> that window's sum, M x N float32."""
+                """A: size x M codes, B: size x N codes -> that reduction's sum, M x N float32."""
                 S = torch.zeros((A.shape[1], B.shape[1]), dtype=torch.float32, device=A.device)
-                for i in range(window):
+                for i in range(size):
                     e, m = sched[i]
                     S = arith.acc_add(S, arith.product(A[i].unsqueeze(1), B[i].unsqueeze(0)), e, m)
                 return S
@@ -141,4 +141,4 @@ def compiled(arith: Arithmetic) -> Arithmetic:
         return cache[key]
 
     return Arithmetic(name=f"compiled({arith.name})", product=c(arith.product), acc_add=c(arith.acc_add),
-                      tile_add=c(arith.tile_add), fused_window=fused_window)
+                      tile_add=c(arith.tile_add), fused_reduction=fused_reduction)

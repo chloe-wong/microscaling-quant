@@ -68,7 +68,7 @@ def exact_add(a: torch.Tensor, b: torch.Tensor, e: int, m: int, rounding_mode: s
     any float32). A zero addend returns the OTHER operand unchanged (golden short-circuit), so 0 + -0 -> -0,
     not +0.
 
-    Three paths, chosen on (e, m) alone so the choice is fixed when a window is compiled:
+    Three paths, chosen on (e, m) alone so the choice is fixed when a reduction is compiled:
 
     float32, when `_fits_float32(e, m)`: the sum is exact in float32, and `_ieee` on float32 input is exact
     for e < 8 (its step 2^(emin - m) >= 2^-13 is a normal float32), so the value rounded is the same one

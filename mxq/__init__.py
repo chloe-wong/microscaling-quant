@@ -11,6 +11,8 @@ the three compositions. A matmul on the codes is a reducer with an Arithmetic an
                         block.mxquant     MXQuant simulation     = scale_factor.mxquant + float_em grid=qtorch
                         block.mxgemmini   MX-Gemmini operands    = scale_factor.mxquant + float_em grid=ocp
                         block.ocp         OCP MX v1.0            = scale_factor.ocp     + element_quant.microsoft
+                        block.lut         MX-Gemmini LUT operand = block.mxgemmini + lut (one 16-entry table per 2^G columns)
+    lut               MX-Gemmini's look-up tables: tables, pick, finder, lookup; bit-identical to the chip's rule
     microxcaling      Microsoft's microxcaling package, verbatim: the oracle block.ocp is validated against
     rounding          ties_away | rne | truncate, on float32 bit patterns or integers; shared by every quantizer
     arith             exact_add, truncate_significand, saturate_product: what a PE does between quantizations
@@ -23,11 +25,11 @@ the three compositions. A matmul on the codes is a reducer with an Arithmetic an
 """
 __version__ = "0.1.0"
 
-from . import microxcaling, rounding, arith, schedule, scale_factor, element_quant, block, matmul, scheme, nn
+from . import microxcaling, rounding, arith, schedule, scale_factor, element_quant, lut, block, matmul, scheme, nn
 from .block import BLOCK
 from ._fp64_accum import fp64_accum
 from .element_quant.formats import Format
 from .scheme import Scheme
 
-__all__ = ["microxcaling", "rounding", "arith", "schedule", "scale_factor", "element_quant", "block", "matmul", "scheme", "nn",
+__all__ = ["microxcaling", "rounding", "arith", "schedule", "scale_factor", "element_quant", "lut", "block", "matmul", "scheme", "nn",
            "BLOCK", "Format", "Scheme", "fp64_accum"]

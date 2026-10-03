@@ -21,14 +21,14 @@ Requires torchao (`pip install microscaling-quant[torchao]`); `import mxq` does 
 """
 from dataclasses import asdict, dataclass, field
 from functools import partial
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import torch
 from torch import nn
 from torchao.core.config import AOBaseConfig
 from torchao.quantization.transform_module import register_quantize_module_handler
 
-from .. import block, matmul
+from .. import block, lut, matmul
 from .._fp64_accum import fp64_accum
 from ..element_quant.formats import get
 from ..scheme import Scheme
@@ -52,6 +52,9 @@ class MXQConfig(AOBaseConfig):
     compiled     matmul.compiled on the Arithmetic, bit-identical to eager. None (default): compiled when the
                  layer's weight is on a GPU, eager on CPU (compilation needs Triton); True / False force it
     chunk        MXLinear's token chunk (None: its default)
+    lut          None: fmt on its element grid. {"group": G, "max_iters": n}: both operands through MX-Gemmini's
+                 LUT, block.lut.quantize (one 16-entry table per 2^G rows of A / columns of B); both keys
+                 required, fmt one of lut.FORMATS, no via
     """
     fmt: str = "MXFP8_E4M3"
     rounding_mode: str = "rne"
@@ -66,6 +69,7 @@ class MXQConfig(AOBaseConfig):
     compiled: Optional[bool] = None
     chunk: Optional[int] = None
     name: str = "mxq"
+    lut: Optional[Dict[str, int]] = None
 
     def __post_init__(self):
         if get(self.fmt) is None:
@@ -87,6 +91,17 @@ class MXQConfig(AOBaseConfig):
             raise ValueError(f"MXQConfig: compiled {self.compiled!r} must be True, False or None")
         if self.chunk is not None and (not _is_int(self.chunk) or self.chunk < 1):
             raise ValueError(f"MXQConfig: chunk {self.chunk!r} must be a positive integer or None")
+        if self.lut is not None:
+            if not isinstance(self.lut, dict) or set(self.lut) != {"group", "max_iters"} or \
+                    not all(_is_int(v) and v >= 0 for v in self.lut.values()):
+                raise ValueError(f"MXQConfig: lut {self.lut!r} must be {{'group': G, 'max_iters': n}}, "
+                                 "non-negative integers")
+            if get(self.fmt).name not in lut.FORMATS:
+                raise ValueError(f"MXQConfig: fmt {self.fmt} has no LUT on MX-Gemmini; LUT formats: "
+                                 f"{', '.join(lut.FORMATS)}")
+            if self.via is not None:
+                raise ValueError("MXQConfig: via is the fp4 requantizer's rounding; a LUT operand has none")
+            self.lut = dict(self.lut)
 
     def scheme(self, device=None) -> Scheme:
         """The Scheme these fields describe, for a layer on `device` (which decides `compiled=None`). Built once per
@@ -96,9 +111,16 @@ class MXQConfig(AOBaseConfig):
         cached = self.__dict__.get("_scheme", {}).get(compile)
         if cached is not None and cached[0] == asdict(self):
             return cached[1]
-        q = partial(block.mxgemmini.quantize, fmt=self.fmt, axis=0, block_size=self.block_size,
-                    rounding_mode=self.rounding_mode, scale_floor=self.scale_floor,
-                    via=tuple(self.via) if self.via is not None else None)
+        if self.lut is None:
+            q = partial(block.mxgemmini.quantize, fmt=self.fmt, axis=0, block_size=self.block_size,
+                        rounding_mode=self.rounding_mode, scale_floor=self.scale_floor,
+                        via=tuple(self.via) if self.via is not None else None)
+            rows = 1
+        else:
+            q = partial(block.lut.quantize, fmt=self.fmt, axis=0, block_size=self.block_size,
+                        rounding_mode=self.rounding_mode, scale_floor=self.scale_floor,
+                        group=self.lut["group"], max_iters=self.lut["max_iters"])
+            rows = 1 << self.lut["group"]
         if self.reduce == "hardware":
             arith = matmul.MXGEMMINI(*self.prod, prod_floor=self.prod_floor)
             if compile:
@@ -107,7 +129,7 @@ class MXQConfig(AOBaseConfig):
                         size=self.size, block_size=self.block_size)
         else:
             r = partial(fp64_accum, block_size=self.block_size)
-        s = Scheme(self.name, a=q, b=q, reduce=r)
+        s = Scheme(self.name, a=q, b=q, reduce=r, rows=rows)
         self.__dict__.setdefault("_scheme", {})[compile] = (asdict(self), s)   # not a field: invisible to asdict
         return s
 

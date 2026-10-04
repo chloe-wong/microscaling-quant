@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field
 from functools import partial
 from typing import List, Optional
 
+import torch
 from torch import nn
 from torchao.core.config import AOBaseConfig
 from torchao.quantization.transform_module import register_quantize_module_handler
@@ -48,7 +49,8 @@ class MXQConfig(AOBaseConfig):
     prod, prod_floor                                   -> matmul.MXGEMMINI(prod_e, prod_m, prod_floor)
     ladder, size                                       -> matmul.systolic(schedule=ladder, size=size)
     reduce       "hardware": the systolic column above; "exact": fp64_accum (same codes, no rounding inside)
-    compiled     matmul.compiled on the Arithmetic (GPU; bit-identical to eager)
+    compiled     matmul.compiled on the Arithmetic, bit-identical to eager. None (default): compiled when the
+                 layer's weight is on a GPU, eager on CPU (compilation needs Triton); True / False force it
     chunk        MXLinear's token chunk (None: its default)
     """
     fmt: str = "MXFP8_E4M3"
@@ -61,7 +63,7 @@ class MXQConfig(AOBaseConfig):
     ladder: List[List[int]] = field(default_factory=lambda: [list(e) for e in HW_FINAL])
     size: int = 16
     reduce: str = "hardware"
-    compiled: bool = False
+    compiled: Optional[bool] = None
     chunk: Optional[int] = None
     name: str = "mxq"
 
@@ -81,13 +83,17 @@ class MXQConfig(AOBaseConfig):
             raise ValueError(f"MXQConfig: prod_floor {self.prod_floor!r} must be an integer exponent or None")
         if not _is_int(self.block_size) or self.block_size < 1 or self.block_size % self.size:
             raise ValueError(f"MXQConfig: block_size {self.block_size!r} must be a multiple of size {self.size}")
+        if self.compiled is not None and not isinstance(self.compiled, bool):
+            raise ValueError(f"MXQConfig: compiled {self.compiled!r} must be True, False or None")
         if self.chunk is not None and (not _is_int(self.chunk) or self.chunk < 1):
             raise ValueError(f"MXQConfig: chunk {self.chunk!r} must be a positive integer or None")
 
-    def scheme(self) -> Scheme:
-        """The Scheme these fields describe. Built once per config and shared by every layer it converts, so a
-        compiled Arithmetic is compiled once, not once per layer. Change a field, get a new config."""
-        cached = self.__dict__.get("_scheme")
+    def scheme(self, device=None) -> Scheme:
+        """The Scheme these fields describe, for a layer on `device` (which decides `compiled=None`). Built once per
+        config and device type and shared by every layer it converts, so a compiled Arithmetic is compiled once,
+        not once per layer. Change a field, get a new config."""
+        compile = self.compiled if self.compiled is not None else torch.device(device or "cpu").type == "cuda"
+        cached = self.__dict__.get("_scheme", {}).get(compile)
         if cached is not None and cached[0] == asdict(self):
             return cached[1]
         q = partial(block.mxgemmini.quantize, fmt=self.fmt, axis=0, block_size=self.block_size,
@@ -95,14 +101,14 @@ class MXQConfig(AOBaseConfig):
                     via=tuple(self.via) if self.via is not None else None)
         if self.reduce == "hardware":
             arith = matmul.MXGEMMINI(*self.prod, prod_floor=self.prod_floor)
-            if self.compiled:
+            if compile:
                 arith = matmul.compiled(arith)
             r = partial(matmul.systolic, arith=arith, schedule=[tuple(e) for e in self.ladder],
                         size=self.size, block_size=self.block_size)
         else:
             r = partial(fp64_accum, block_size=self.block_size)
         s = Scheme(self.name, a=q, b=q, reduce=r)
-        self.__dict__["_scheme"] = (asdict(self), s)      # not a field: invisible to asdict and config_to_dict
+        self.__dict__.setdefault("_scheme", {})[compile] = (asdict(self), s)   # not a field: invisible to asdict
         return s
 
     @classmethod
@@ -133,7 +139,7 @@ def _to_mx(module: nn.Module, config: MXQConfig) -> nn.Module:
     """Route this Linear's forward through an MXLinear that shares its weight and bias; return the same object."""
     if not isinstance(module, nn.Linear):
         raise TypeError(f"MXQConfig applies to nn.Linear, got {type(module).__name__}")
-    impl = MXLinear(module, config.scheme(), chunk=config.chunk)
+    impl = MXLinear(module, config.scheme(module.weight.device), chunk=config.chunk)
     object.__setattr__(module, "_mxq", impl)          # not a registered child: no duplicate parameters
     module.forward = impl.forward
     return module

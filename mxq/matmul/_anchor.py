@@ -17,6 +17,10 @@ ceil(log2(width + 1)) + 1 bits; drop "truncate" (a right shift of the magnitude,
 Two RTL behaviours belong to the Arithmetic, not the tree: MxGen's S4 saturates to max-normal and maps NaN
 to 0, where MXGEMMINI's lane overflows to Inf and keeps NaN.
 K tail: missing products are zeros, as hardware feeds them.
+
+Speed: with a compiled Arithmetic (mxq.matmul.compiled) a whole reduction, every tree and every level, is
+one compiled function, as systolic's fused_reduction is. Same operations in the same order; the terms are a
+list of M x N tensors rather than one stacked tensor, so nothing is written to memory between steps.
 """
 import math
 from typing import Optional, Sequence, Tuple
@@ -33,7 +37,10 @@ DROPS = ("truncate", "rne")
 
 
 def _log2_floor(x: torch.Tensor) -> torch.Tensor:
-    """floor(log2|x|) as float64 for x != 0; the value at 0 is never used."""
+    """floor(log2|x|) as float64 for x != 0; the value at 0 is never used. Inf and NaN (a narrow lane that
+    overflowed upstream) get -1, the value eager frexp gives them; compiled frexp gives another, which moved the
+    anchor and turned an Inf into a NaN. Any finite value would do: an Inf or NaN term decides the sum alone."""
+    x = torch.where(torch.isfinite(x), x, torch.full_like(x, 0.5))
     return (torch.frexp(x.abs())[1] - 1).to(torch.float64)
 
 
@@ -43,21 +50,51 @@ def _keep(x: torch.Tensor, drop: str) -> torch.Tensor:
 
 
 def _tree(p, label, c, e, m, bits, drop, headroom, arith):
-    """p, label: width x M x N products and labels; c: M x N running sum. Returns the new c, float32."""
+    """p, label: lists of width M x N products and labels; c: M x N running sum. Returns the new c, float32."""
     neg = torch.full(c.shape, -math.inf, dtype=torch.float64, device=c.device)
-    top = torch.where(p != 0, label, neg).amax(0)
-    top = torch.maximum(top, torch.where(c != 0, _log2_floor(c) - 1, neg))
+    top = torch.where(c != 0, _log2_floor(c) - 1, neg)
+    for pk, lk in zip(p, label):
+        top = torch.maximum(top, torch.where(pk != 0, lk, neg))
     anchor = torch.where(torch.isfinite(top), top, torch.zeros_like(top)) + headroom
-    x = torch.cat([p.to(torch.float64), c.to(torch.float64).unsqueeze(0)])
-    x = _keep(x / torch.exp2(anchor + 2 - bits[0]), drop)                   # S2: exact, a power of two
+    grid = torch.exp2(anchor + 2 - bits[0])
+    x = [_keep(t.to(torch.float64) / grid, drop) for t in p + [c]]            # S2: exact, a power of two
     for level in range(1, len(bits)):                                          # S3
-        n = x.shape[0]
-        pairs = x[0:n - n % 2:2] + x[1:n - n % 2:2]
-        x = torch.cat([pairs, x[n - 1:]]) if n % 2 else pairs                 # an odd one passed up
+        pairs = [x[i] + x[i + 1] for i in range(0, len(x) - 1, 2)]
+        x = pairs + x[-1:] if len(x) % 2 else pairs                            # an odd one passed up
         if bits[level] != bits[level - 1]:
-            x = _keep(x / 2.0 ** (bits[level - 1] - bits[level]), drop)
+            x = [_keep(t / 2.0 ** (bits[level - 1] - bits[level]), drop) for t in x]
     s = (x[0] * torch.exp2(anchor + 2 - bits[-1])).to(torch.float32)         # exact: |x| < 2^23
     return arith.acc_add(torch.zeros_like(c), s, e, m)                         # S4: the lane rounding
+
+
+def _reduction(A, B, la, lb, per_tree, width, drop, headroom, arith):
+    """One reduction: A n x M and B n x N codes (n = size, fewer in a K tail), la and lb their labels.
+    size / width trees chained through c; products past n are zeros. Returns c, M x N float32."""
+    n = A.shape[0]
+    c = torch.zeros((A.shape[1], B.shape[1]), dtype=torch.float32, device=A.device)
+    for t, (e, m, b) in enumerate(per_tree):
+        ks = range(t * width, min((t + 1) * width, n))
+        p = [arith.product(A[k].unsqueeze(1), B[k].unsqueeze(0)) for k in ks]
+        label = [la[k].unsqueeze(1) + lb[k].unsqueeze(0) for k in ks]
+        zero = torch.zeros_like(c)
+        p += [zero] * (width - len(p))
+        label += [zero.to(torch.float64)] * (width - len(label))
+        c = _tree(p, label, c, e, m, b, drop, headroom, arith)
+    return c
+
+
+_COMPILED: dict = {}
+
+
+def _fused(arith, per_tree, width, drop, headroom):
+    """`_reduction` compiled for one configuration, built once and reused; None for an uncompiled Arithmetic."""
+    if getattr(arith, "fused_reduction", None) is None:
+        return None
+    key = (id(arith), tuple((e, m, tuple(b)) for e, m, b in per_tree), width, drop, headroom)
+    if key not in _COMPILED:
+        body = lambda A, B, la, lb: _reduction(A, B, la, lb, per_tree, width, drop, headroom, arith)
+        _COMPILED[key] = (arith, torch.compile(body, dynamic=False))           # arith held: its id stays unique
+    return _COMPILED[key][1]
 
 
 def anchor_tree(P_A: torch.Tensor, X_A: torch.Tensor, P_B: torch.Tensor, X_B: torch.Tensor,
@@ -90,20 +127,17 @@ def anchor_tree(P_A: torch.Tensor, X_A: torch.Tensor, P_B: torch.Tensor, X_B: to
     la, lb = _log2_floor(P_A), _log2_floor(P_B)
     if emin is not None:
         la, lb = la.clamp(min=emin), lb.clamp(min=emin)
-    dev = P_A.device
-    C = torch.zeros((M, N), dtype=torch.float32, device=dev)
+    body = _fused(arith, per_tree, width, drop, head)
+    C = torch.zeros((M, N), dtype=torch.float32, device=P_A.device)
     for g in range(0, K, block_size):
         g_end = min(g + block_size, K)
         scales = scale_map(X_A, X_B, g // block_size)
         for k0 in range(g, g_end, size):
-            c = torch.zeros((M, N), dtype=torch.float32, device=dev)
-            for t, (e, m, b) in enumerate(per_tree):
-                lo, hi = k0 + t * width, min(k0 + (t + 1) * width, g_end)
-                p = torch.zeros((width, M, N), dtype=torch.float32, device=dev)
-                label = torch.zeros((width, M, N), dtype=torch.float64, device=dev)
-                if hi > lo:
-                    p[:hi - lo] = arith.product(P_A[lo:hi].unsqueeze(2), P_B[lo:hi].unsqueeze(1))
-                    label[:hi - lo] = la[lo:hi].unsqueeze(2) + lb[lo:hi].unsqueeze(1)
-                c = _tree(p, label, c, e, m, b, drop, head, arith)
+            k1 = min(k0 + size, g_end)
+            args = (P_A[k0:k1], P_B[k0:k1], la[k0:k1], lb[k0:k1])
+            if body is not None and k1 - k0 == size:
+                c = body(*args)
+            else:                                                              # uncompiled, or a short K tail
+                c = _reduction(*args, per_tree, width, drop, head, arith)
             C = arith.tile_add(C, c * scales)
     return C.to(torch.float32)

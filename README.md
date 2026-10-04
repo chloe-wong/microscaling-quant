@@ -158,6 +158,8 @@ replaces, on CPU and CUDA.
 | `block.mxgemmini` | MXQuant `quantize_mx_block32` (round nearest); operands of npu-exploration `rtl_exact` saved hardware test case |
 | `matmul.systolic` + `MXQUANT` | MXQuant `MXLinearSim._simulate_atw`, bit-identical, 3 schedules × 3 product formats |
 | `matmul.systolic` + `MXGEMMINI` | hardware output `Y_hw` of the `rtl_exact` test case (TinyLlama MLP), 65536/65536 identical |
+| `matmul.anchor_tree` | MxGen `MxDotProduct` in chiseltest (E4M3, 4 cores, product and accumulator Custom(8,8)): 8000 calls and 200 chained 16-product windows identical |
+| `matmul.adder_tree` | each node is the `MXGEMMINI` lane add above; the arrangement into a tree has no RTL to check against |
 | `Scheme` | `.matmul` equals the explicit quantizer + reducer calls |
 | `nn.MXLinear` | MXQuant `MXLinearSim.forward`, bit-identical (bf16 inputs, bias, three lengths, two ladders); every chunk size equals unchunked |
 | `nn.patch` | the `rtl_exact` MLP built from `nn.Linear` layers and patched by type: `Y_hw` 65536/65536; rule order, unused-rule and bad-Scheme errors, revert, tied weights |

@@ -71,7 +71,7 @@ handle.revert()                          # put the originals back
 ```
 
 From TorchAO or Hugging Face (`pip install -e ".[torchao]"`): the same MXLinear behind `torchao.quantize_`, for tools
-that only accept a TorchAO config (Model2MLIR, `transformers.TorchAoConfig`, lm-eval). The config is plain fields
+that only accept a TorchAO config (`transformers.TorchAoConfig`, lm-eval). The config is plain fields
 (defaults: the MX-Gemmini tapeout), so it can go into a checkpoint's config.json; `patch` stays the primary API.
 
 ```python
@@ -85,6 +85,12 @@ quantize_(model, cfg)                             # every nn.Linear, changed in 
 model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=TorchAoConfig(cfg))   # HF skips lm_head
 cfg2 = MXQConfig.from_dict(config_to_dict(cfg))   # torchao's own config_from_dict cannot find classes outside torchao
 ```
+
+Compiler capture uses a separate operand-only TorchAO handler and exported
+graph pass. They let a target select exact `nn.Linear` and functional matmul
+sites, including mixed FP8/FP6/FP4 and host choices. The target still owns
+RTL compatibility, legal shapes, reviewed FP6 LUTs, and manifest binding.
+See [MX operand capture integration](docs/capture-integration.md).
 
 Product / accumulator quantization to any float(e, m):
 
@@ -133,6 +139,8 @@ mxq/
     _linear.py       MXLinear: one nn.Linear through one Scheme; weight codes cached, token rows chunked (bit-identical)
     _patch.py        patch(model, rules): a Scheme per layer name or layer type, first match wins; dry_run, revert
     torchao.py       MXQConfig: the same MXLinear behind torchao.quantize_ (optional, needs torchao)
+    operand_capture.py  BF16 MX operand codes, TorchAO capture handler, and functional Q/DQ pass
+docs/capture-integration.md  target adapter boundary and mixed precision capture usage
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
 ```
 

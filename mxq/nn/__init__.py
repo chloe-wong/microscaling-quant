@@ -6,6 +6,8 @@
 
 mxq.nn.torchao (optional, needs torchao; not imported here): MXQConfig, the same MXLinear behind torchao.quantize_
 and Hugging Face TorchAoConfig.
+mxq.nn.operand_capture (optional TorchAO handler; not imported here): operand Q/DQ and graph capture for
+targets whose software contracts approve the BF16, block-32 MX profile.
 """
 from ._linear import MXLinear
 from ._patch import is_attention, patch

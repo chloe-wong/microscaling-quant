@@ -144,11 +144,11 @@ def main():
         lo, hi = (int(v) for v in args.samples.split(":")) if args.samples else (0, ids.shape[0])
         hi = min(hi, ids.shape[0])                                 # asking for more samples than the data has
         model = load_model(args.model_id, args.seqlen)
-        table = []
+        table, cores = [], []
         if rules is not None:
             handle = patch(model, rules, chunk=args.chunk, dry_run=args.dry_run,
                            cache_weights=not args.no_cache_weights)
-            table = handle.table
+            table, cores = handle.table, handle.cores
         if args.dry_run:
             return
         t0, per_sample = time.time(), []
@@ -156,10 +156,12 @@ def main():
             nll, n = sample_nll(model, ids[i])
             per_sample.append({"index": i, "nll": nll, "tokens": n})
             print(f"  [{args.rules}] sample {i + 1}/{ids.shape[0]}  nll/token {nll / n:.6f}  {time.time() - t0:.0f}s", flush=True)
-        schemes = {s.name: describe(s) for _, s in (rules or []) if s is not None}
-        rule_list = [[describe(sel), None if s is None else s.name] for sel, s in (rules or [])]
+        each = [x for _, v in (rules or []) for x in (v if isinstance(v, tuple) else (v,)) if x is not None]
+        schemes = {x.name: describe(x) for x in each}           # a (qk, pv) rule contributes both
+        rule_list = [[describe(sel), None if v is None else [x.name for x in v] if isinstance(v, tuple) else v.name]
+                     for sel, v in (rules or [])]
         record = {"rules": args.rules, "model": args.model_id, "seqlen": args.seqlen, "nsamples": args.nsamples, "seed": seed,
-                  "mxq_commit": commit(), "rule_list": rule_list, "schemes": schemes, "layers": table,
+                  "mxq_commit": commit(), "rule_list": rule_list, "schemes": schemes, "layers": table, "cores": cores,
                   "per_sample": per_sample, "seconds": time.time() - t0}
 
     total, tokens = 0.0, 0

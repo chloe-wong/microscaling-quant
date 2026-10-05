@@ -29,6 +29,8 @@ The configuration, value by value, and where each value comes from:
                       Gemmini
     layers            every nn.Linear except the attention projections; lm_head IS quantized
                       MXQuant, complete_integration_e2e/eval_complete.py
+                      (opt-in lists: _proj adds the projections, _core the attention core Q·Kᵀ and P·V,
+                      _all both)
 
 How far this is proven. The MX-Gemmini datapath here -- product, accumulate, cross-tile, ladder, window -- is
 bit-identical to a real hardware capture: all 65536 elements of npu-exploration
@@ -48,7 +50,7 @@ from torch import nn
 from mxq import Scheme, block, matmul, scale_factor, schedule
 from mxq.nn import is_attention
 
-__all__ = ["OPERANDS", "ARITHMETIC", "LADDER", "HW_MXFP8_TAPEOUT", "mlp_and_head", "RULES"]
+__all__ = ["OPERANDS", "ARITHMETIC", "LADDER", "HW_MXFP8_TAPEOUT", "mlp_and_head", "with_core", "RULES"]
 
 #: MX-Gemmini's operand codes: block scale, then the MXFP8_E4M3 element grid, rounded as the RTL rounds.
 OPERANDS = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0,
@@ -73,9 +75,22 @@ def mlp_and_head(scheme):
 
 #: A rule list says which nn.Linear gets which Scheme: (name with * wildcards | type | function, Scheme|None).
 #: First match wins; None leaves the layer as it is.
+def with_core(scheme, rules):
+    """`rules` with the attention core (Q·Kᵀ and P·V) of every attention module through `scheme` too."""
+    return [(_holds_core, (scheme, scheme))] + rules
+
+
+def _holds_core(name, module, parent):
+    return hasattr(module, "q_proj") and hasattr(module, "k_proj")
+
+
 RULES = {
     "none": None,                                       # no patch at all: the model as loaded, in bf16
     "hw_mxfp8_tapeout": mlp_and_head(HW_MXFP8_TAPEOUT),
+    # opt-in, beyond MXQuant's layer set: the attention projections, the attention core, or both
+    "hw_mxfp8_tapeout_proj": [(nn.Linear, HW_MXFP8_TAPEOUT)],
+    "hw_mxfp8_tapeout_core": with_core(HW_MXFP8_TAPEOUT, mlp_and_head(HW_MXFP8_TAPEOUT)),
+    "hw_mxfp8_tapeout_all": with_core(HW_MXFP8_TAPEOUT, [(nn.Linear, HW_MXFP8_TAPEOUT)]),
 }
 
 try:                                                    # machine-local extras, not part of this repo

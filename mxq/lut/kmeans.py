@@ -1,10 +1,12 @@
 """Fitting the tables and picking indices, for a K×n tensor of block codes: one table per 2^G columns.
 
-    T = tables(P, fmt, group=G, max_iters=50)   (n >> G) × SIZE values, each row sorted ascending
+    T = tables(P, fmt, group=G, max_iters=50)   ceil(n / 2^G) × SIZE values, each row sorted ascending
     I = pick(P, T, group=G)                     K×n: each code's nearest entry, ties to the lower index
     P_lut = lookup(I, T, group=G)
 
-A table is fitted to the codes of its group (2^G whole columns, all of K):
+A table is fitted to the codes of its group (2^G columns, all of K; when n is not a multiple of 2^G the last
+group is the columns left over, fitted by the same rule. The chip's LUT loader takes whole groups only, and
+npu-exploration's emitter refuses a partial one, so this is for simulation, where a token count is arbitrary):
   1. the group's distinct codes, each weighted by how often it occurs;
   2. 16 or fewer distinct codes: they are the centres; else seed 16 centres at the quantiles of that weighted
      set, then weighted Lloyd passes (an empty cluster keeps its centre; equal centres merge) until two passes
@@ -30,11 +32,7 @@ def _check(P: torch.Tensor, group: int) -> int:
         raise ValueError(f"mxq.lut: expects a K×n tensor, got shape {tuple(P.shape)}")
     if not isinstance(group, int) or isinstance(group, bool) or group < 0:
         raise ValueError(f"mxq.lut: group {group!r} must be a non-negative integer")
-    n = P.shape[1]
-    if n % (1 << group):
-        raise ValueError(f"mxq.lut: {n} columns is not a multiple of 2^group = {1 << group}; "
-                         "a table covers 2^group whole columns")
-    return n >> group
+    return (P.shape[1] + (1 << group) - 1) >> group                             # a partial last group counts
 
 
 def _dedupe(C: torch.Tensor) -> torch.Tensor:
@@ -46,7 +44,8 @@ def _dedupe(C: torch.Tensor) -> torch.Tensor:
 
 
 def tables(P: torch.Tensor, fmt, *, group: int, max_iters: int) -> torch.Tensor:
-    """One SIZE-entry table per 2^group columns of P (K×n block codes, every one a value of fmt)."""
+    """One SIZE-entry table per 2^group columns of P (K×n block codes, every one a value of fmt); the last
+    table covers the columns left over when n is not a multiple of 2^group."""
     f = _format(fmt)
     ng = _check(P, group)
     if not isinstance(max_iters, int) or isinstance(max_iters, bool) or max_iters < 0:

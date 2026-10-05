@@ -12,7 +12,8 @@ differ, and neither can change a bit of the output:
 
 A LUT activation (block.lut) is the one quantizer that couples tokens: 2^G token rows share a table. A Scheme says
 so in `rows` (= 2^G), and every chunk is then a multiple of `rows` starting at a multiple of it, so each table sees
-the same tokens it would unchunked.
+the same tokens it would unchunked; when the token count is not a multiple of `rows`, the last table takes the
+tokens left over, chunked or not.
 
 Chunking is also faster: past roughly three million elements per contraction step the reducer's intermediates
 stop being cache friendly (measured on an L40S), so the default keeps each call under that.

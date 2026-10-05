@@ -5,8 +5,9 @@
     V_hat = dequantize(P, X, axis=0)
 
 Same contract as block.<name>: P has V's shape, X one scale per block along `axis`. V is 2-D; the tables
-group along the other axis, 2^group whole rows/columns per table spanning all of `axis` (K). For a Scheme
-operand (K×M or K×N, axis=0) that is 2^group rows of A or columns of B, as on the chip.
+group along the other axis, 2^group rows/columns per table spanning all of `axis` (K), the last table taking
+what is left over. For a Scheme operand (K×M or K×N, axis=0) that is 2^group rows of A or columns of B, as on
+the chip (whose loader takes whole groups only; a partial one exists here for arbitrary token counts).
 
 Every setting is required: the chip's are in the hardware and run recipes, and a default here would be a
 second place for them. See mxq.lut for the rule.

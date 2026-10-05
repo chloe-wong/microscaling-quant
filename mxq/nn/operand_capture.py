@@ -15,20 +15,63 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 __all__ = [
-    "MXOperandContractionOperands", "MXOperandFakeQuantConfig", "MXOperandLinear",
+    "CaptureDecision", "MXOperandContractionOperands", "MXOperandFakeQuantConfig", "MXOperandLinear",
     "apply_mx_operand_", "dequant_mx_operand_for_graph", "expose_sdpa_contractions",
     "functional_contraction_operands", "linear_contraction_operands",
     "quantize_functional_contractions_", "quantize_mx_operand",
+    "quantize_selected_linear_modules_",
 ]
 
 
 GROUP = 32
+OPERAND_PROFILE = "bf16_e8m0_block32_rne"
 # OCP MX formats used by the BF16, block-32, RNE operand profile.
 _FORMATS = {
     "mxfp8": (4, 3, 7, 0x7E),
     "mxfp6": (3, 2, 3, 0x1F),
     "mxfp4": (2, 1, 1, 0x07),
 }
+
+
+@dataclass(frozen=True)
+class CaptureDecision:
+    """Authored disposition for one contraction, independent of its target.
+
+    ``preserve`` keeps a site in its source dtype for a named execution route.
+    ``host`` records an explicit host fallback. ``refuse`` stops capture.
+    MX choices only use the BF16/E8M0/block-32/RNE profile implemented here;
+    the target adapter must separately verify its RTL and shape contract.
+    """
+
+    action: str
+    format: str | None = None
+    execution_route: str | None = None
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.action == "mx":
+            if self.format not in ("mxfp8", "mxfp6", "mxfp4") or self.reason or self.execution_route:
+                raise ValueError("MX capture needs one supported format and no refusal reason")
+        elif self.action == "preserve":
+            if (not isinstance(self.execution_route, str) or not self.execution_route
+                    or self.format or self.reason):
+                raise ValueError("preserved capture needs an execution route and no MX format")
+        elif self.action == "host":
+            if self.format or self.execution_route or self.reason:
+                raise ValueError("host capture cannot declare an accelerator route or MX format")
+        elif self.action == "refuse":
+            if not isinstance(self.reason, str) or not self.reason or self.format or self.execution_route:
+                raise ValueError("refused capture needs a reason and no execution route")
+        else:
+            raise ValueError(f"unknown capture action: {self.action}")
+
+
+def _capture_decision(value: CaptureDecision | str) -> CaptureDecision:
+    if isinstance(value, CaptureDecision):
+        return value
+    if value == "host":
+        return CaptureDecision("host")
+    return CaptureDecision("mx", format=value)
 
 
 def _positive_grid(fmt: str, device: torch.device) -> Tensor:
@@ -301,6 +344,31 @@ def apply_mx_operand_(model: nn.Module, format: str = "mxfp8") -> nn.Module:
     return model
 
 
+def quantize_selected_linear_modules_(
+    model: nn.Module, selections: dict[str, MXOperandFakeQuantConfig]
+) -> nn.Module:
+    """Run TorchAO only on exact Linear FQNs selected by a target adapter.
+
+    The adapter owns the RTL gate, graph inventory, and policy. This function
+    checks that every selected module exists before changing any weights.
+    """
+    modules = dict(model.named_modules())
+    for name, config in selections.items():
+        if not name or not isinstance(modules.get(name), nn.Linear):
+            raise ValueError(f"selected Linear {name!r} is absent from model")
+        if not isinstance(config, MXOperandFakeQuantConfig):
+            raise TypeError(f"selected Linear {name!r} needs MXOperandFakeQuantConfig")
+    if not selections:
+        return model
+    from torchao.quantization import quantize_
+
+    for name, config in selections.items():
+        selected = modules[name]
+        quantize_(model, config, filter_fn=lambda module, fqn, wanted=name, original=selected:
+                  fqn == wanted and module is original)
+    return model
+
+
 def dequant_mx_operand_for_graph(value: Tensor, format: str, axis: int,
                                  codebook: tuple[int, ...] | None = None) -> Tensor:
     """Exportable arithmetic Q/DQ, equivalent to finite BF16 grid lookup."""
@@ -423,12 +491,17 @@ def quantize_functional_contractions_(graph_module: torch.fx.GraphModule, select
             # module census entry and must keep that disposition.
             continue
         site_id = f"functional:{node.name}"
-        format = select(site_id)
-        if format == "host":
+        decision = _capture_decision(select(site_id))
+        if decision.action == "host":
             census.append({"site_id": site_id, "kind": "functional", "status": "host"})
             continue
-        if format not in ("mxfp8", "mxfp6", "mxfp4"):
-            raise ValueError(f"unsupported MX format: {format}")
+        if decision.action == "preserve":
+            census.append({"site_id": site_id, "kind": "functional", "status": "preserved",
+                           "execution_route": decision.execution_route})
+            continue
+        if decision.action == "refuse":
+            raise ValueError(f"site {site_id} refused: {decision.reason}")
+        format = decision.format
         # The TorchAO handler already inserted dynamic activation quantization
         # and materialized static weight codes for this Linear.
         if any("MXOperandLinear" in str(value) for value in stack.values()):

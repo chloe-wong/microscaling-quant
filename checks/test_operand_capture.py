@@ -3,12 +3,14 @@ import torch
 from torch import nn
 
 from mxq.nn.operand_capture import (
+    CaptureDecision,
     MXOperandFakeQuantConfig,
     MXOperandLinear,
     dequant_mx_operand_for_graph,
     functional_contraction_operands,
     quantize_functional_contractions_,
     quantize_mx_operand,
+    quantize_selected_linear_modules_,
 )
 
 
@@ -37,35 +39,46 @@ def test_operand_rejects_partial_blocks_and_invalid_fp6_lut():
 
 
 def test_torchao_selects_only_one_linear():
-    from torchao.quantization import quantize_
-
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 32)).eval()
     host = model[2]
-    quantize_(model, MXOperandFakeQuantConfig(), filter_fn=lambda _, fqn: fqn == "0")
+    quantize_selected_linear_modules_(model, {"0": MXOperandFakeQuantConfig()})
     assert isinstance(model[0], MXOperandLinear)
     assert model[2] is host
     assert model(torch.ones(32, 32)).shape == (32, 32)
 
 
+def test_torchao_selection_rejects_missing_module_before_transform():
+    model = nn.Sequential(nn.Linear(32, 32)).eval()
+    with pytest.raises(ValueError, match="absent"):
+        quantize_selected_linear_modules_(model, {
+            "0": MXOperandFakeQuantConfig(), "missing": MXOperandFakeQuantConfig()
+        })
+    assert isinstance(model[0], nn.Linear)
+
+
 def test_mixed_precision_functional_census_and_graph():
     class Net(nn.Module):
-        def forward(self, x, a, b, c):
+        def forward(self, x, a, b, c, d):
             x = torch.matmul(x, a)
             x = torch.matmul(x, b)
-            return torch.matmul(x, c)
+            x = torch.matmul(x, c)
+            return torch.matmul(x, d)
 
-    inputs = tuple(torch.ones(32, 32) for _ in range(4))
+    inputs = tuple(torch.ones(32, 32) for _ in range(5))
     exported = torch.export.export(Net().eval(), inputs)
     graph_module = exported.module()
     sites = [node for node in graph_module.graph.nodes if node.target == torch.ops.aten.matmul.default]
-    assert len(sites) == 3
-    choices = dict(zip((f"functional:{node.name}" for node in sites), ("mxfp8", "mxfp4", "host")))
+    assert len(sites) == 4
+    choices = dict(zip((f"functional:{node.name}" for node in sites), (
+        "mxfp8", "mxfp4", CaptureDecision("preserve", execution_route="simt_float"), "host"
+    )))
     census = quantize_functional_contractions_(
         graph_module, choices.__getitem__, contract={},
         shape_reason=lambda _contract, _fmt, _m, _n, _k: None,
     )
     assert [(row["status"], row.get("format")) for row in census] == [
-        ("quantized", "mxfp8"), ("quantized", "mxfp4"), ("host", None)
+        ("quantized", "mxfp8"), ("quantized", "mxfp4"),
+        ("preserved", None), ("host", None)
     ]
     assert torch.isfinite(graph_module(*inputs)).all()
 
@@ -84,6 +97,29 @@ def test_target_shape_refusal_leaves_graph_unmodified():
     )
     assert census[0]["status"] == "skipped"
     assert census[0]["reason"] == "target refuses this shape"
+    assert str(graph.graph) == before
+
+
+def test_preserved_and_refused_sites_do_not_receive_mx_quantization():
+    class Net(nn.Module):
+        def forward(self, lhs, rhs):
+            return torch.matmul(lhs, rhs)
+
+    inputs = (torch.ones(32, 32), torch.ones(32, 32))
+    graph = torch.export.export(Net().eval(), inputs).module()
+    before = str(graph.graph)
+    census = quantize_functional_contractions_(
+        graph, lambda _site: CaptureDecision("preserve", execution_route="simt_float"),
+        contract={}, shape_reason=lambda *_: None,
+    )
+    assert census[0]["status"] == "preserved"
+    assert census[0]["execution_route"] == "simt_float"
+    assert str(graph.graph) == before
+    with pytest.raises(ValueError, match="operand scale encoding is unreviewed"):
+        quantize_functional_contractions_(
+            graph, lambda _site: CaptureDecision("refuse", reason="operand scale encoding is unreviewed"),
+            contract={}, shape_reason=lambda *_: None,
+        )
     assert str(graph.graph) == before
 
 

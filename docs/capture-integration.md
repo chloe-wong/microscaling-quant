@@ -28,25 +28,25 @@ the authored per-site precision policy, FP6 LUT review, output chains,
 packing, lowering, and manifest verification. The shared library does not
 guess a precision from accuracy or select all eligible sites.
 
-For modules, call TorchAO with an exact site filter:
+For modules, use the exact-site TorchAO helper:
 
 ```python
-from torchao.quantization import quantize_
-from mxq.nn.operand_capture import MXOperandFakeQuantConfig
+from mxq.nn.operand_capture import MXOperandFakeQuantConfig, quantize_selected_linear_modules_
 
-quantize_(model, MXOperandFakeQuantConfig(format="mxfp8"),
-          filter_fn=lambda module, fqn: fqn == "encoder.project")
+quantize_selected_linear_modules_(
+    model, {"encoder.project": MXOperandFakeQuantConfig(format="mxfp8")}
+)
 ```
 
 For functional `matmul`, `mm`, `bmm`, `linear`, and `addmm` sites in an
 exported graph, the target supplies its policy lookup and shape gate:
 
 ```python
-from mxq.nn.operand_capture import quantize_functional_contractions_
+from mxq.nn.operand_capture import CaptureDecision, quantize_functional_contractions_
 
 census = quantize_functional_contractions_(
     exported.module(),
-    select=lambda site_id: authored_policy[site_id],
+    select=lambda site_id: authored_policy[site_id],  # CaptureDecision or legacy format string
     contract=compiled_contract,
     shape_reason=target_shape_reason,
     codebooks_for=reviewed_fp6_codebooks,
@@ -54,15 +54,27 @@ census = quantize_functional_contractions_(
 ```
 
 The pass returns every visible functional contraction with its disposition:
-`quantized`, `host`, or `skipped` with a reason. A fused SDPA site must be
+`quantized`, `host`, `preserved`, or `skipped` with a reason. `preserved` means
+the tensor remains in its source dtype for an explicitly named accelerator
+execution route; it requires a model2MLIR `m2m.quantization_manifest.v2` receipt.
+`CaptureDecision("refuse", reason=...)` stops capture rather than silently
+selecting another format. A fused SDPA site must be
 exposed with `expose_sdpa_contractions` before running the pass. The target
 adapter adds module sites, verifies exact graph identity and policy coverage,
 and emits the model2MLIR quantization manifest with contract and policy
 digests. The target package registers the `m2m.quantization_adapters` entry
 point; `mxq` does not register a target adapter.
 
-This separation lets another target use the same operand profile only after
-its own reviewed contract approves the numerical semantics and shape rules.
-Atlas currently lacks reviewed block size and scale encoding, so it cannot
-select this profile by default. A Radiance MX PE can use it after its own
-contract and validation establish compatibility.
+For MX-Gemmini, the out-of-tree adapter verifies its standalone RTL and contract,
+then chooses MX FP8, FP6, FP4, or host at each site. For Radiance, an adapter
+can preserve selected SIMT float sites using
+`CaptureDecision("preserve", execution_route="simt_float")` and apply this MX
+profile only to sites assigned to the contained MX PE. Its RTL configuration
+differs from the standalone MX-Gemmini configuration, so the adapter must
+verify numerical equivalence against that configuration before selecting MX.
+For Atlas, the selected software spec describes FP8 E4M3 operands but leaves
+the model operand scale encoding and block size unknown. Its adapter must
+refuse hardware FP8 quantization until those rules and the resulting encoding
+are reviewed; the E8M0-named result pack ports do not settle operand scaling.
+These are capture routes, not claims of executable lowering or full-model
+numerical qualification.

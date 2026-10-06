@@ -35,14 +35,19 @@ def systolic(P_A: torch.Tensor, X_A: torch.Tensor, P_B: torch.Tensor, X_B: torch
     if block_size % size != 0:
         raise ValueError(f"size {size} must divide block size {block_size}")
     C = torch.zeros((M, N), dtype=torch.float32, device=P_A.device)
-    # An Arithmetic may offer to do a whole reduction at once (mxq.matmul.compiled does). Same operations in the
-    # same order; it is one fused kernel instead of one per step. A short tail reduction is a different shape, so
-    # it stays on the step-by-step path rather than forcing a rebuild per tail length.
+    # An Arithmetic may offer to do a whole block at once, or a whole reduction (mxq.matmul.compiled does both).
+    # Same operations in the same order; it is one fused call instead of one per step. A K tail is a different
+    # shape, so a partial block takes its full reductions one at a time and a short reduction goes step by step,
+    # rather than forcing a rebuild per tail length.
+    whole = arith.fused_block(schedule, size, block_size) if getattr(arith, "fused_block", None) else None
     body = arith.fused_reduction(schedule, size) if getattr(arith, "fused_reduction", None) else None
 
     for g in range(0, K, block_size):
         g_end = min(g + block_size, K)
         scales = scale_map(X_A, X_B, g // block_size)
+        if whole is not None and g_end - g == block_size:
+            C = whole(P_A[g:g_end], P_B[g:g_end], scales, C)
+            continue
         for k_base in range(g, g_end, size):
             k_end = min(k_base + size, g_end)
             if body is not None and k_end - k_base == size:

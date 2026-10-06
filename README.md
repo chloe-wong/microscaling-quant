@@ -32,6 +32,23 @@ V_hat = block.mxquant.dequantize(P, X, axis=0)             # == P * expand(X)
 `P` has `V`'s shape. `X` has `V`'s shape with the block axis of length ceil(len/32) (last block zero-padded).
 Formats: `MXFP8_E4M3`, `MXFP8_E5M2`, `MXFP6_E3M2`, `MXFP6_E2M3`, `MXFP4`, `FP32` (pass-through).
 
+MX-Gemmini's LUT formats (`MXFP6_E3M2`, `MXFP6_E2M3`, `MXFP8_E5M2`, `MXFP8_E4M3` on the quad PE) send each
+element as a 4-bit index into a 16-entry table of element values, one table per 2^G columns of a K×n operand
+(rows of A, columns of B). `block.lut` is that operand, bit-identical to the chip's rule (npu-exploration
+`compiler/codebook.py`, whose kernels are bit-exact on spike). Every setting is required:
+
+```python
+P, X = block.lut.quantize(V, "MXFP6_E3M2", axis=0, block_size=32, rounding_mode="rne", scale_floor=2**-23,
+                          group=1, max_iters=50)               # V_hat = P * expand(X); P holds table entries
+from mxq import lut                                            # the steps, on K×n block codes P
+T = lut.tables(P, "MXFP6_E3M2", group=1, max_iters=50)         # (n >> G) × 16 entries
+I = lut.pick(P, T, group=1)                                    # 4-bit indices (host pick: nearest, ties low)
+I = lut.finder(codes, T, "MXFP6_E3M2", group=1)                # the chip's finder, for requantized outputs
+```
+
+In a Scheme, pass `rows=2**G` so MXLinear keeps each group of tokens in one call; `MXQConfig(lut={"group": G,
+"max_iters": n})` does this for you.
+
 A matmul on the codes is a reducer (the order of the additions) plus an Arithmetic (the rounding at each step)
 plus a schedule (the accumulator format at each position). Every piece is named explicitly; there are no presets:
 
@@ -41,6 +58,8 @@ P_A, X_A = block.mxgemmini.quantize(x.t(), "MXFP8_E4M3", axis=0)      # A = xᵀ
 P_B, X_B = block.mxgemmini.quantize(W.t(), "MXFP8_E4M3", axis=0)      # B = Wᵀ, K×N
 Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), schedule.HW_FINAL)    # M×N, bit-identical to MX-Gemmini
 Y = matmul.systolic(P_A, X_A, P_B, X_B, matmul.MXQUANT(4, 3), schedule.HW_FINAL)  # MXQuant's simulation
+Y = matmul.anchor_tree(P_A, X_A, P_B, X_B, matmul.MXGEMMINI())                    # MxGen's anchor tree, bf16 out
+Y = matmul.adder_tree(P_A, X_A, P_B, X_B, matmul.MXGEMMINI(), [(4, 4), (4, 5), (4, 6), (8, 7)])   # one format per level
 Y = fp64_accum(P_A, X_A, P_B, X_B)                                                 # same codes, no rounding inside the multiply
 ```
 
@@ -66,6 +85,22 @@ rules = [("*.self_attn.*", None),        # attention projections stay as they ar
 patch(model, rules, dry_run=True)        # print which layer gets what; change nothing
 handle = patch(model, rules)             # replace the chosen layers with mxq.nn.MXLinear
 handle.revert()                          # put the originals back
+```
+
+From TorchAO or Hugging Face (`pip install -e ".[torchao]"`): the same MXLinear behind `torchao.quantize_`, for tools
+that only accept a TorchAO config (Model2MLIR, `transformers.TorchAoConfig`, lm-eval). The config is plain fields
+(defaults: the MX-Gemmini tapeout), so it can go into a checkpoint's config.json; `patch` stays the primary API.
+
+```python
+from torchao.core.config import config_to_dict
+from torchao.quantization import quantize_
+from transformers import AutoModelForCausalLM, TorchAoConfig
+from mxq.nn.torchao import MXQConfig
+
+cfg = MXQConfig(fmt="MXFP8_E4M3")                 # rounding, scale floor, product, ladder, size: see the class
+quantize_(model, cfg)                             # every nn.Linear, changed in place
+model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=TorchAoConfig(cfg))   # HF skips lm_head
+cfg2 = MXQConfig.from_dict(config_to_dict(cfg))   # torchao's own config_from_dict cannot find classes outside torchao
 ```
 
 Product / accumulator quantization to any float(e, m):
@@ -98,20 +133,27 @@ mxq/
     mxquant.py       scale_factor.mxquant + float_em grid=qtorch  -> MXQuant's simulation (all reported perplexities)
     mxgemmini.py     scale_factor.mxquant + float_em grid=ocp     -> MX-Gemmini operand codes
     ocp.py           scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.microxcaling
+    lut.py           mxgemmini + mxq.lut                         -> MX-Gemmini LUT operand (2-D; group, max_iters required)
     _driver.py       split along an axis into 32-blocks, pad, run the two steps, reassemble; BLOCK = 32
+  lut/               MX-Gemmini's look-up tables (layout from the luts branch, PR #1)
+    formats.py       decode / encode element codes; values(fmt): what the finder tells apart; finder: the chip's index
+    kmeans.py        tables (weighted k-means on distinct codes, snapped, padded), pick (host nearest), lookup
   microxcaling/      Microsoft's microxcaling package, verbatim (MIT). Oracle only; see microxcaling/UPSTREAM.md
   rounding/          ties_away | rne | truncate, on float32 bit patterns (round_bits) or integers (round_int)
   arith.py           exact_add, truncate_significand, saturate_product: what a PE does between quantizations
   matmul/            the array dataflows: Y = Aᵀ·B from codes and scales, summed in the hardware's order
     _arithmetic.py   Arithmetic(product, acc_add, tile_add); MXQUANT(prod_e, prod_m) and MXGEMMINI(): the datapaths, stage by stage
-    _systolic.py     the PE column (window deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate
+    _systolic.py     the PE column (`size` deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate
+    _anchor.py       MxGen's anchor tree: align to one anchor, integer adds, one rounding per tree; `width`, per-level `bits`
+    _adder.py        an adder tree: log2(size) levels of pairwise acc_add, one float(e, m) per level; the tree is not RTL-checked
     _common.py       operand shape, dtype and device checks, schedule length check, per-block scale map
   _fp64_accum.py     fp64_accum: the same codes with no rounding inside the multiply, the error floor; not an architecture
   schedule.py        one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL; exactly rows entries or ValueError
-  scheme.py          Scheme(name, a, b, reduce): one explicit chain for one matmul, .matmul(A, B); no presets
+  scheme.py          Scheme(name, a, b, reduce, rows=1): one explicit chain for one matmul, .matmul(A, B); no presets
   nn/                putting Schemes into a model
     _linear.py       MXLinear: one nn.Linear through one Scheme; weight codes cached, token rows chunked (bit-identical)
     _patch.py        patch(model, rules): a Scheme per layer name or layer type, first match wins; dry_run, revert
+    torchao.py       MXQConfig: the same MXLinear behind torchao.quantize_ (optional, needs torchao)
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
 ```
 
@@ -137,7 +179,10 @@ replaces, on CPU and CUDA.
 | `block.mxgemmini` | MXQuant `quantize_mx_block32` (round nearest); operands of npu-exploration `rtl_exact` saved hardware test case |
 | `matmul.systolic` + `MXQUANT` | MXQuant `MXLinearSim._simulate_atw`, bit-identical, 3 schedules × 3 product formats |
 | `matmul.systolic` + `MXGEMMINI` | hardware output `Y_hw` of the `rtl_exact` test case (TinyLlama MLP), 65536/65536 identical |
+| `matmul.anchor_tree` | MxGen `MxDotProduct` in chiseltest (E4M3, 4 cores, product and accumulator Custom(8,8)): 8000 calls and 200 chained 16-product windows identical |
+| `matmul.adder_tree` | each node is the `MXGEMMINI` lane add above; the arrangement into a tree has no RTL to check against |
 | `Scheme` | `.matmul` equals the explicit quantizer + reducer calls |
+| `lut`, `block.lut` | npu-exploration `compiler/codebook.py` (the rule its LUT kernels are bit-exact on spike with): tables, picks, finder, values, decode, 4 formats × G 0/1/2, random and TinyLlama operands, CPU and CUDA (`tests/selftest_codebook_mxq.py` there); MXLinear with a LUT Scheme: every chunk size equals unchunked |
 | `nn.MXLinear` | MXQuant `MXLinearSim.forward`, bit-identical (bf16 inputs, bias, three lengths, two ladders); every chunk size equals unchunked |
 | `nn.patch` | the `rtl_exact` MLP built from `nn.Linear` layers and patched by type: `Y_hw` 65536/65536; rule order, unused-rule and bad-Scheme errors, revert, tied weights |
 | `block.ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |

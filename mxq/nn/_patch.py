@@ -105,7 +105,8 @@ def patch(model: nn.Module, rules: Sequence[Rule], chunk: Optional[int] = None, 
 
     for scheme in {id(s): s for _, s in rules if s is not None}.values():     # fail now, not mid-run
         g = torch.Generator().manual_seed(0)
-        scheme.matmul(torch.randn(32, 2, generator=g), torch.randn(32, 2, generator=g))
+        n = 2 * scheme.rows                                                     # a LUT activation: two whole groups
+        scheme.matmul(torch.randn(32, n, generator=g), torch.randn(32, n, generator=g))
 
     table = [(name, m.in_features, m.out_features, hit,
               None if hit is None or rules[hit][1] is None else rules[hit][1].name)

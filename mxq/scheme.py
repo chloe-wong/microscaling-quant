@@ -5,6 +5,9 @@ are multiplied. There are no presets; the caller names every piece.
         a(V) -> (P, X)   how operand A becomes codes and scales (V is K×M, blocks along K)
         b(V) -> (P, X)   how operand B becomes codes and scales (V is K×N, blocks along K)
         reduce(P_A, X_A, P_B, X_B) -> Y   a dataflow with its Arithmetic and schedule already bound
+        rows = 1          columns of A (token rows) that `a` must see in one call: a LUT operand
+                          (block.lut, group G) shares a table across 2^G of them, so MXLinear splits its tokens
+                          in multiples of `rows`
     Scheme.matmul(A, B) -> Y = Aᵀ·B  runs the three in order.
 
 a and b are the same A and B the reducers use. For a Linear layer, A = xᵀ is the activation and B = Wᵀ is the
@@ -35,6 +38,11 @@ class Scheme:
     a: Quantizer
     b: Quantizer
     reduce: Reducer
+    rows: int = 1
+
+    def __post_init__(self):
+        if not isinstance(self.rows, int) or isinstance(self.rows, bool) or self.rows < 1:
+            raise ValueError(f"Scheme: rows {self.rows!r} must be a positive integer")
 
     def matmul(self, A: Tensor, B: Tensor) -> Tensor:
         """Y = Aᵀ·B for A: K×M and B: K×N, both float."""

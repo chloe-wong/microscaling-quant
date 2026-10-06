@@ -10,6 +10,11 @@ differ, and neither can change a bit of the output:
     every rounding step is elementwise, so nothing in the datapath couples two tokens. (The K axis is coupled,
     through block boundaries and accumulator positions, and is never split.)
 
+A LUT activation (block.lut) is the one quantizer that couples tokens: 2^G token rows share a table. A Scheme says
+so in `rows` (= 2^G), and every chunk is then a multiple of `rows` starting at a multiple of it, so each table sees
+the same tokens it would unchunked; when the token count is not a multiple of `rows`, the last table takes the
+tokens left over, chunked or not.
+
 Chunking is also faster: past roughly three million elements per contraction step the reducer's intermediates
 stop being cache friendly (measured on an L40S), so the default keeps each call under that.
 
@@ -35,6 +40,8 @@ class MXLinear(nn.Module):
         super().__init__()
         if chunk is not None and chunk < 1:
             raise ValueError(f"chunk must be >= 1, got {chunk}")
+        if chunk is not None and chunk % scheme.rows:
+            raise ValueError(f"chunk {chunk} must be a multiple of scheme {scheme.name!r} rows = {scheme.rows}")
         self.in_features, self.out_features = linear.in_features, linear.out_features
         self.weight = linear.weight                       # the same Parameter, not a copy
         self.bias = linear.bias
@@ -59,7 +66,8 @@ class MXLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shape = x.shape
         flat = x.reshape(-1, shape[-1]).float()                                               # M×K
-        step = self.chunk or max(1, ELEMENTS_PER_STEP // self.out_features)
+        rows = self.scheme.rows
+        step = self.chunk or max(rows, ELEMENTS_PER_STEP // self.out_features // rows * rows)
         P_W, X_W = (self.P_W, self.X_W) if self.cache_weights else self._codes()
         rows = [self.scheme.reduce(*self.scheme.a(part.t().contiguous()), P_W, X_W)           # A = xᵀ, K×m
                 for part in flat.split(step)]

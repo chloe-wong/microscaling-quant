@@ -1,59 +1,37 @@
-"""mxq.block.lut — any block quantizer followed by an mxq.lut table per group of codes.
+"""mxq.block.lut — MX-Gemmini's LUT operand: block.mxgemmini, then one 16-entry table per 2^group columns.
 
-    P, X = quantize(V, "MXFP6_E3M2", axis=0)                          V_hat = P * expand(X)   (same contract as block.<name>)
-    P, X = quantize(V, "MXFP6_E3M2", base=block.mxquant, num_signposts=8)
+    P, X = quantize(V, "MXFP6_E3M2", axis=0, block_size=32, rounding_mode="rne", scale_floor=2**-23,
+                    group=1, max_iters=50)                                  V_hat = P * expand(X)
     V_hat = dequantize(P, X, axis=0)
 
-    V              tensor to quantize
-    fmt            element format, passed to base.quantize (e.g. "MXFP6_E3M2"). The tables always snap to the
-                   FP6 E3M2 codebook, so any other format warns: its codes are fine, its tables are E3M2
-    axis           the axis blocks run along (0 for a K×N weight: blocks along K)
-    block_size     values per block; one scale per block
-    base           module whose quantize(V, fmt, axis, block_size) makes the codes: mxgemmini (default), mxquant, ...
-    num_signposts  table entries per group (16 = 4-bit indices)
-    iters          k-means iterations
-    granularity    what shares one table:
-                     mx       each block
-                     channel  every block at the same index along V's first non-block axis
-"""
-import warnings
-from types import ModuleType
+Same contract as block.<name>: P has V's shape, X one scale per block along `axis`. V is 2-D; the tables
+group along the other axis, 2^group rows/columns per table spanning all of `axis` (K), the last table taking
+what is left over. For a Scheme operand (K×M or K×N, axis=0) that is 2^group rows of A or columns of B, as on
+the chip (whose loader takes whole groups only; a partial one exists here for arbitrary token counts).
 
+Every setting is required: the chip's are in the hardware and run recipes, and a default here would be a
+second place for them. See mxq.lut for the rule.
+"""
 import torch
 
 from . import _driver, mxgemmini
 from .. import lut
-from ..element_quant.formats import get
 
 __all__ = ["quantize", "dequantize"]
 
 
-def quantize(V, fmt, axis=0, block_size=_driver.BLOCK, *,
-             base: ModuleType = mxgemmini, num_signposts=16, iters=3, granularity='channel'):
-    """base.quantize, then a num_signposts-entry table per group. Returns (P codes, X scales), float32."""
-    f = get(fmt)
-    if f is None or f.name != "MXFP6_E3M2":
-        warnings.warn(f"block.lut: fmt={fmt!r}, but the LUT tables snap to the FP6 E3M2 codebook only: "
-                      f"the codes are {fmt!r}, the table entries are E3M2 values", stacklevel=2)
-    P, X = base.quantize(V, fmt=fmt, axis=axis, block_size=block_size)
-    b = _driver.to_blocks(P, axis, block_size)                                  # (..., nblocks, block_size)
-
-    if granularity == 'mx':
-        rows = b.data.reshape(-1, block_size)                                   # one row per block
-    elif granularity == 'channel':
-        if b.data.ndim < 3:
-            raise ValueError("granularity 'channel' needs V.ndim >= 2")
-        moved = b.data.movedim(1, 0)                                            # one row per index along dim 1
-        rows = moved.reshape(moved.shape[0], -1)
-    else:
-        raise ValueError(f"Unknown granularity: {granularity}. Must be 'mx' or 'channel'.")
-
-    I, T = lut.fit(rows, num_signposts=num_signposts, iters=iters)
-    P_lut = T.gather(1, I)
-
-    if granularity == 'channel':
-        P_lut = P_lut.reshape(moved.shape).movedim(0, 1)
-    return _driver.codes_from_blocks(P_lut.reshape(b.data.shape), b), X
+def quantize(V: torch.Tensor, fmt, axis: int, block_size: int, *, rounding_mode: str, scale_floor: float,
+             group: int, max_iters: int):
+    """block.mxgemmini.quantize, then each code replaced by its table entry. Returns (P, X), float32."""
+    if V.ndim != 2 or axis not in (0, 1, -1, -2):
+        raise ValueError(f"block.lut: V must be 2-D with axis 0 or 1, got shape {tuple(V.shape)}, axis {axis}")
+    lut.formats._format(fmt)                                                     # refuse a non-LUT format first
+    P, X = mxgemmini.quantize(V, fmt, axis=axis, block_size=block_size, rounding_mode=rounding_mode,
+                              scale_floor=scale_floor)
+    Pk = P if axis % 2 == 0 else P.t()                                           # K×n
+    T = lut.tables(Pk, fmt, group=group, max_iters=max_iters)
+    P_lut = lut.lookup(lut.pick(Pk, T, group=group), T, group=group)
+    return (P_lut if axis % 2 == 0 else P_lut.t()).contiguous(), X
 
 
 def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = _driver.BLOCK) -> torch.Tensor:

@@ -11,11 +11,13 @@ the three compositions. A matmul on the codes is a reducer with an Arithmetic an
                         block.mxquant     MXQuant simulation     = scale_factor.mxquant + float_em grid=qtorch
                         block.mxgemmini   MX-Gemmini operands    = scale_factor.mxquant + float_em grid=ocp
                         block.ocp         OCP MX v1.0            = scale_factor.ocp     + element_quant.microsoft
-    lut               step 3, a table per group of codes: I, T = lut.fit(groups); block.lut groups by block or channel
+                        block.lut         MX-Gemmini LUT operand = block.mxgemmini + lut (one 16-entry table per 2^G columns)
+    lut               MX-Gemmini's look-up tables: tables, pick, finder, lookup; bit-identical to the chip's rule
     microxcaling      Microsoft's microxcaling package, verbatim: the oracle block.ocp is validated against
     rounding          ties_away | rne | truncate, on float32 bit patterns or integers; shared by every quantizer
     arith             exact_add, truncate_significand, saturate_product: what a PE does between quantizations
-    matmul            the array dataflows, Y = Aᵀ·B from codes and scales: systolic;
+    matmul            the array dataflows, Y = Aᵀ·B from codes and scales, one call for all three:
+                      systolic (the PE column) | anchor_tree (MxGen's anchor tree) | adder_tree (a format per level);
                       Arithmetic = the three rounding points, with MXQUANT and MXGEMMINI as the two documented datapaths
     fp64_accum        the same codes with no rounding inside the multiply: the error floor, not an architecture
     schedule          one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL

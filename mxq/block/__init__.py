@@ -6,10 +6,10 @@
     mxquant      scale_factor.mxquant + float_em grid=qtorch      MXQuant's simulation codes (all reported perplexities)
     mxgemmini    scale_factor.mxquant + float_em grid=ocp         MX-Gemmini's operand codes (== rtl_exact operands)
     ocp          scale_factor.ocp     + element_quant.microsoft   OCP MX v1.0 as Microsoft's microxcaling computes it
-    lut          any of the above + an mxq.lut table per block or channel   level-2 LUT codes
+    lut          mxgemmini + mxq.lut (2-D, all settings required)  MX-Gemmini's LUT operand: codes replaced by table entries
 
 `dequantize` is also exported from the package itself: putting the scales back is layout only, identical for
-every composition, so each one's dequantize is the same function under its own name.
+every composition, so each composition's dequantize is the same function under its own name.
 _driver.py holds the shared plumbing: split along an axis into blocks, pad, run the two steps, reassemble.
 """
 from ._driver import BLOCK, dequantize

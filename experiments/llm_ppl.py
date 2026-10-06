@@ -3,6 +3,9 @@
     python experiments/llm_ppl.py --rules none                          # the model as loaded, in bf16
     python experiments/llm_ppl.py --rules hw_mxfp8_tapeout --gpus 0,1,2,3
     python experiments/llm_ppl.py --rules hw_mxfp8_tapeout --dry-run      # which layer gets which Scheme, then stop
+    python experiments/llm_ppl.py --rules hw_mxfp8_tapeout_all --vector bf16                      # softmax + RMSNorm in bf16
+    python experiments/llm_ppl.py --rules hw_mxfp8_tapeout_all --vector bf16 --vector-ops rmsnorm # one vector op
+    python experiments/llm_ppl.py --rules hw_mxfp8_tapeout_all --dtype float32                    # fp32 between matmuls
 
 The result lands in experiments/results/<rules>.json, which is not tracked: it holds the per-sample numbers,
 the rule list and the Schemes as they actually ran, so a number can be traced back to a chain.
@@ -22,15 +25,15 @@ import torch
 import torch.nn.functional as F
 
 
-def load_model(model_id, seqlen):
+def load_model(model_id, seqlen, dtype=torch.bfloat16):
     from transformers import AutoConfig, AutoModelForCausalLM
     config = AutoConfig.from_pretrained(model_id)
     ctx = getattr(config, "max_position_embeddings", None)
     if ctx and seqlen > ctx:
         config.rope_scaling = {"type": "linear", "factor": float(math.ceil(seqlen / ctx))}
     model = AutoModelForCausalLM.from_pretrained(model_id, config=config, use_safetensors=True,
-                                                 torch_dtype=torch.bfloat16, device_map="auto")
-    return model.eval().bfloat16()
+                                                 torch_dtype=dtype, device_map="auto")
+    return model.eval().to(dtype)
 
 
 def load_samples(model_id, seqlen, nsamples, seed):
@@ -103,13 +106,23 @@ def main():
                     help="recompute the weight codes each forward instead of holding them. The cache is a "
                          "second float32 copy of every quantized weight, which is what runs a large model out "
                          "of memory; recomputing costs well under one percent of a run.")
+    ap.add_argument("--vector", choices=["none", "bf16"], default="none",
+                    help="the vector ops' precision (mxq.nn._vector): none = as transformers computes them")
+    ap.add_argument("--vector-ops", default="softmax,rmsnorm", help="which vector ops --vector applies to")
+    ap.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16",
+                    help="the model's dtype: the residual stream and every op between the matmuls")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     from experiments import recipes
     from mxq.nn import patch
+    from mxq.nn._vector import resolve
     rules = recipes.RULES[args.rules]
-    out = Path(args.out or REPO / "experiments" / "results" / f"{args.rules}.json")
+    ops = [op for op in args.vector_ops.split(",") if op]
+    vector = resolve(None if args.vector == "none" else {op: args.vector for op in ops})
+    label = args.rules + (f"_vec-{args.vector}-{'+'.join(ops)}" if args.vector != "none" else "") + \
+        ("_fp32" if args.dtype == "float32" else "")
+    out = Path(args.out or REPO / "experiments" / "results" / f"{label}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     seed = None if args.sequential else args.seed
@@ -131,6 +144,7 @@ def main():
                 cmd += ["--chunk", str(args.chunk)]
             if args.no_cache_weights:
                 cmd += ["--no-cache-weights"]
+            cmd += ["--vector", args.vector, "--vector-ops", args.vector_ops, "--dtype", args.dtype]
             procs.append(subprocess.Popen(cmd, env={**os.environ, "CUDA_VISIBLE_DEVICES": g}))
         if any(p.wait() for p in procs):
             raise SystemExit("a worker failed")
@@ -143,25 +157,26 @@ def main():
         ids = load_samples(args.model_id, args.seqlen, args.nsamples, seed)
         lo, hi = (int(v) for v in args.samples.split(":")) if args.samples else (0, ids.shape[0])
         hi = min(hi, ids.shape[0])                                 # asking for more samples than the data has
-        model = load_model(args.model_id, args.seqlen)
-        table, cores = [], []
-        if rules is not None:
-            handle = patch(model, rules, chunk=args.chunk, dry_run=args.dry_run,
-                           cache_weights=not args.no_cache_weights)
-            table, cores = handle.table, handle.cores
+        model = load_model(args.model_id, args.seqlen, getattr(torch, args.dtype))
+        table, cores, norms = [], [], []
+        if rules is not None or any(vector.values()):
+            handle = patch(model, rules or [], chunk=args.chunk, dry_run=args.dry_run,
+                           cache_weights=not args.no_cache_weights, vector=vector)
+            table, cores, norms = handle.table, handle.cores, handle.norms
         if args.dry_run:
             return
         t0, per_sample = time.time(), []
         for i in range(lo, hi):
             nll, n = sample_nll(model, ids[i])
             per_sample.append({"index": i, "nll": nll, "tokens": n})
-            print(f"  [{args.rules}] sample {i + 1}/{ids.shape[0]}  nll/token {nll / n:.6f}  {time.time() - t0:.0f}s", flush=True)
+            print(f"  [{label}] sample {i + 1}/{ids.shape[0]}  nll/token {nll / n:.6f}  {time.time() - t0:.0f}s", flush=True)
         each = [x for _, v in (rules or []) for x in (v if isinstance(v, tuple) else (v,)) if x is not None]
         schemes = {x.name: describe(x) for x in each}           # a (qk, pv) rule contributes both
         rule_list = [[describe(sel), None if v is None else [x.name for x in v] if isinstance(v, tuple) else v.name]
                      for sel, v in (rules or [])]
         record = {"rules": args.rules, "model": args.model_id, "seqlen": args.seqlen, "nsamples": args.nsamples, "seed": seed,
                   "mxq_commit": commit(), "rule_list": rule_list, "schemes": schemes, "layers": table, "cores": cores,
+                  "vector": vector, "rmsnorms": norms, "dtype": args.dtype,
                   "per_sample": per_sample, "seconds": time.time() - t0}
 
     total, tokens = 0.0, 0
@@ -170,7 +185,7 @@ def main():
     record["perplexity"] = math.exp(total / tokens)
     out.write_text(json.dumps(record, indent=1))
     if not args.samples:
-        print(f"PERPLEXITY [{args.rules}] : {record['perplexity']:.6f}   ({len(record['per_sample'])} samples, {record['seconds']:.0f}s)  -> {out}")
+        print(f"PERPLEXITY [{label}] : {record['perplexity']:.6f}   ({len(record['per_sample'])} samples, {record['seconds']:.0f}s)  -> {out}")
 
 
 if __name__ == "__main__":

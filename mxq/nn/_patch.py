@@ -28,8 +28,21 @@ module and its parent) and runs their core through mxq.nn.attend:
 The model is switched to the "mxq" attention implementation (transformers' AttentionInterface, with eager's
 additive mask); an attention module no core rule chose runs sdpa as before. With no core rule, nothing about
 attention changes. `revert` undoes both kinds.
+
+The vector ops around the matmuls (softmax, RMSNorm) run as transformers computes them unless `vector` says
+otherwise (mxq.nn._vector has what each setting rounds and why):
+
+    patch(model, rules, vector="bf16")                      # softmax and every RMSNorm: each step rounded to bf16
+    patch(model, rules, vector={"rmsnorm": "bf16"})         # one op; an op left out stays as transformers has it
+
+softmax: every attention module runs through attend with that setting. A module no core rule chose gets the
+`exact` core (no quantization, float64 sums), because sdpa computes softmax inside one fused kernel where no step
+can be rounded. rmsnorm: the forward of every module whose class name ends in RMSNorm is replaced, after a check
+that the replacement with no rounding returns the module's own output bit for bit; a module computing anything
+else is refused by name. `revert` undoes these too.
 """
 from fnmatch import fnmatchcase
+from functools import partial
 from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 import torch
@@ -38,6 +51,7 @@ from torch import nn
 from ..scheme import Scheme
 from ._attention import NAME as _CORE, attend, register
 from ._linear import MXLinear
+from ._vector import EXACT, resolve, rmsnorm
 
 __all__ = ["patch", "is_attention"]
 
@@ -65,6 +79,37 @@ def _smoke_core(qk: Scheme, pv: Scheme) -> None:
     t = 64 * max(qk.rows, pv.rows)                                              # whole 32-blocks of keys, whole groups
     q, k, v = (torch.randn(1, n, t, 32, generator=g) for n in (2, 1, 1))
     attend(q, k, v, None, 32 ** -0.5, qk, pv)
+
+
+def _is_rmsnorm(module: nn.Module) -> bool:
+    return type(module).__name__.endswith("RMSNorm")
+
+
+def _eps(module: nn.Module) -> float:
+    for attr in ("variance_epsilon", "eps"):                                    # Llama and most; Phi-3, others
+        if isinstance(getattr(module, attr, None), float):
+            return getattr(module, attr)
+    raise ValueError(f"{type(module).__name__}: no float variance_epsilon or eps attribute")
+
+
+def _check_rmsnorm(name: str, module: nn.Module) -> float:
+    """The replacement with no rounding must give the module's own output, bit for bit. Returns eps."""
+    weight = getattr(module, "weight", None)
+    if not isinstance(weight, torch.Tensor) or weight.ndim != 1:
+        raise ValueError(f"{name} ({type(module).__name__}): no 1-D weight, not the RMSNorm mxq knows")
+    eps = _eps(module)
+    g = torch.Generator().manual_seed(0)
+    x = (torch.randn(3, weight.shape[0], generator=g) * 3).to(device=weight.device, dtype=weight.dtype)
+    with torch.no_grad():
+        theirs, ours = module(x), rmsnorm(x, weight, eps, None)
+    if theirs.dtype != ours.dtype or not torch.equal(theirs, ours):
+        raise ValueError(f"{name} ({type(module).__name__}) does not compute weight · x / sqrt(mean(x²) + eps) the way "
+                         "transformers' LlamaRMSNorm does; vector rmsnorm cannot replace it")
+    return eps
+
+
+def _rmsnorm_forward(module: nn.Module, eps: float, precision: str, x: torch.Tensor) -> torch.Tensor:
+    return rmsnorm(x, module.weight, eps, precision)
 
 
 def _set_attention(model: nn.Module, name: str) -> None:
@@ -99,9 +144,11 @@ class Handle:
 
     def __init__(self, model: nn.Module, table: List[tuple], replaced: List[Tuple[nn.Module, str, nn.Module]],
                  cores: Optional[List[tuple]] = None, cored: Optional[List[nn.Module]] = None,
-                 previous: Optional[str] = None):
+                 previous: Optional[str] = None, vector: Optional[dict] = None, norms: Optional[List[str]] = None,
+                 normed: Optional[List[nn.Module]] = None):
         self._model, self.table, self._replaced = model, table, replaced
         self.cores, self._cored, self._previous = cores or [], cored or [], previous
+        self.vector, self.norms, self._normed = vector or resolve(None), norms or [], normed or []
 
     def revert(self) -> None:
         for parent, leaf, original in self._replaced:
@@ -109,9 +156,14 @@ class Handle:
         self._replaced = []
         for module in self._cored:
             del module._mxq_core
+            if hasattr(module, "_mxq_vector"):
+                del module._mxq_vector
         if self._cored:
             _set_attention(self._model, self._previous)
         self._cored = []
+        for module in self._normed:
+            del module.forward                                                  # the class's forward again
+        self._normed = []
 
     def __str__(self) -> str:
         width = max([len(r[0]) for r in self.table] + [len(r[0]) for r in self.cores] + [5])
@@ -119,16 +171,22 @@ class Handle:
         for name, k, n, rule, scheme in self.table:
             lines.append(f"{name:{width}s}  {k:6d} {n:6d}  {'-' if rule is None else rule:>4}  "
                          f"{'no rule' if rule is None else (scheme or 'left as is')}")
-        if any(rule is not None for _, rule, _ in self.cores):
+        if any(names is not None for _, _, names in self.cores):
             lines.append(f"{'attention core':{width}s}  {'':13s}  rule  Q·Kᵀ, P·V")
             for name, rule, names in self.cores:
                 lines.append(f"{name:{width}s}  {'':13s}  {'-' if rule is None else rule:>4}  "
-                             f"{'sdpa (no rule)' if names is None else ', '.join(names)}")
+                             f"{'sdpa (no rule)' if names is None else ', '.join(names)}"
+                             f"{'  (vector softmax)' if rule is None and names is not None else ''}")
+        if any(self.vector.values()):
+            n = {"softmax": sum(names is not None for _, _, names in self.cores), "rmsnorm": len(self.norms)}
+            lines.append("vector  " + ", ".join(f"{op} {p or 'as transformers'}" + (f" ({n[op]} modules)" if p else "")
+                                                for op, p in self.vector.items()))
         return "\n".join(lines)
 
 
 def patch(model: nn.Module, rules: Sequence[Rule], chunk: Optional[int] = None, dry_run: bool = False,
-          cache_weights: bool = True) -> Handle:
+          cache_weights: bool = True, vector=None) -> Handle:
+    vector = resolve(vector)
     for i, rule in enumerate(rules):
         if len(rule) != 2 or not (rule[1] is None or isinstance(rule[1], Scheme) or _is_core(rule[1])):
             raise ValueError(f"rule {i} must be (selector, Scheme or None or (qk Scheme, pv Scheme)), got {rule!r}")
@@ -176,16 +234,27 @@ def patch(model: nn.Module, rules: Sequence[Rule], chunk: Optional[int] = None, 
             raise ValueError(f"{[r[0] for r in rows]} are the same layer but match different rules "
                              f"{[r[3] for r in rows]}; one of them has to go")
 
+    if vector["softmax"] and not cores:
+        raise ValueError("vector softmax: the model has no attention module (one holding q_proj and k_proj)")
+    norms = list({id(m): (n, m) for n, m in walk if n and _is_rmsnorm(m)}.values()) if vector["rmsnorm"] else []
+    if vector["rmsnorm"] and not norms:
+        raise ValueError("vector rmsnorm: the model has no module whose class name ends in RMSNorm")
+
     for i in linear_rules:                                                      # fail now, not mid-run
         if rules[i][1] is not None:
             _smoke(rules[i][1])
     for i in core_rules:
         _smoke_core(*rules[i][1])
+    if vector["softmax"] and any(hit is None for _, _, hit in cores):
+        _smoke_core(EXACT, EXACT)
+    eps = [_check_rmsnorm(n, m) for n, m in norms]
 
     table = [(name, m.in_features, m.out_features, hit,
               None if hit is None or rules[hit][1] is None else rules[hit][1].name)
              for name, m, _, hit in chosen]
-    core_table = [(name, hit, None if hit is None else tuple(s.name for s in rules[hit][1]))
+    def core_of(hit):                                                           # (qk, pv), or None for sdpa
+        return rules[hit][1] if hit is not None else (EXACT, EXACT) if vector["softmax"] else None
+    core_table = [(name, hit, None if core_of(hit) is None else tuple(s.name for s in core_of(hit)))
                   for name, _, hit in cores]
     replaced = []
     if not dry_run:
@@ -197,14 +266,21 @@ def patch(model: nn.Module, rules: Sequence[Rule], chunk: Optional[int] = None, 
             setattr(parent, leaf, MXLinear(module, rules[hit][1], chunk, cache_weights))
             replaced.append((parent, leaf, module))
     cored, previous = [], None
-    if not dry_run and any(hit is not None for _, _, hit in cores):
+    if not dry_run and any(core_of(hit) is not None for _, _, hit in cores):
         register()
         previous = model.config._attn_implementation
-        for _, module, hit in {id(m): (n, m, h) for n, m, h in cores if h is not None}.values():
-            module._mxq_core = rules[hit][1]
+        for _, module, hit in {id(m): (n, m, h) for n, m, h in cores if core_of(h) is not None}.values():
+            module._mxq_core = core_of(hit)
+            if vector["softmax"]:
+                module._mxq_vector = vector["softmax"]
             cored.append(module)
         _set_attention(model, _CORE)
-    handle = Handle(model, table, replaced, core_table, cored, previous)
+    normed = []
+    if not dry_run:
+        for (_, module), e in zip(norms, eps):
+            module.forward = partial(_rmsnorm_forward, module, e, vector["rmsnorm"])
+            normed.append(module)
+    handle = Handle(model, table, replaced, core_table, cored, previous, vector, [n for n, _ in norms], normed)
     if dry_run:
         print(handle)
     return handle

@@ -5,6 +5,7 @@
     is_attention                 a selector for the attention projections, by what the parent holds
     attend(q, k, v, mask, scale, qk, pv)   the attention core with Q·Kᵀ and P·V through two Schemes; patch() routes
                                  attention modules to it with a (qk, pv) rule
+    patch(..., vector="bf16")    softmax and RMSNorm with every step rounded to bf16 (mxq.nn._vector)
 
 mxq.nn.torchao (optional, needs torchao; not imported here): MXQConfig, the same MXLinear behind torchao.quantize_
 and Hugging Face TorchAoConfig.

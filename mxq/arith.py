@@ -122,9 +122,15 @@ def flush_product(x: torch.Tensor, floor_exp: int) -> torch.Tensor:
 def saturate_product(x: torch.Tensor, e: int, m: int) -> torch.Tensor:
     """MxPEOutToRaw saturation after the product truncation. Golden `mx_product_saturate`.
 
-    hardfloat treats biased exponent 2^e - 1 as special, so the PE saturates to mantissa 2^m - 2 at unbiased
-    exponent bias + 1. For e4m3 that is 448, the format max. Values below max_normal pass through unchanged.
-    Only (4, 3) is validated against hardware; other (e, m) follow the golden's general formula unchecked.
+    A product above the format's largest value becomes that value. hardfloat treats biased exponent 2^e - 1 as
+    special, so for e4m3 the largest value is mantissa 2^m - 2 at unbiased exponent bias + 1, i.e. 448 (the
+    format max, validated against hardware); every other (e, m) uses the IEEE max-normal, mantissa 2^m - 1 at
+    exponent bias, unchecked against hardware. Values up to the largest pass through unchanged.
+
+    Before 2026-10-06 a saturated value of any other (e, m) was written as the golden's general formula,
+    (2 - 2^(1-m)) * 2^(bias+1): about twice the format's largest value, and for e = 8 above float32's max, so
+    the e8m7 (bf16) product crashed when the constant was built. Nothing a 32-element MX block multiplies
+    exceeds 4, so no validated result depended on it.
     Edge cases, as in the golden: +-Inf saturates (Inf > max_normal); NaN stays NaN; -0 becomes +0 (sign(-0) = 0).
     """
     x = x.to(torch.float32)
@@ -134,6 +140,5 @@ def saturate_product(x: torch.Tensor, e: int, m: int) -> torch.Tensor:
     scale = float(2 ** m)
     max_mant = (2 ** m - 2) if is_mx_fp8 else (2 ** m - 1)
     max_normal = (2.0 ** emax) * (1.0 + max_mant / scale)
-    sat_val = (1.0 + (2 ** m - 2) / scale) * (2.0 ** (bias + 1))
     ax = x.abs()
-    return torch.sign(x) * torch.where(ax > max_normal, torch.full_like(ax, sat_val), ax)
+    return torch.sign(x) * torch.where(ax > max_normal, torch.full_like(ax, max_normal), ax)

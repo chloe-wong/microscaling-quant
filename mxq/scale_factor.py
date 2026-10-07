@@ -3,11 +3,13 @@
 Both rules take the block's max |value| (any shape, computed by the caller) and return a
 power-of-two scale of the same shape and dtype.
 
-    mxquant(amax, floor)   X = 2^floor(log2 max(amax, floor))     block max lands in [1, 2)
+    mxquant(amax, floor, shift)  X = 2^(floor(log2 max(amax, floor)) - shift)   block max lands in [2^shift, 2^(shift+1))
     ocp(amax, emax)        X = 2^(floor(log2 amax) - emax)         block max lands in the format's top binade
 
 mxquant is the rule used by MXQuant's linear-layer simulation and by the MX-Gemmini RTL and
-spike (gemmini 0b2cc2c and later: log2_pmax = 0). `floor` is the smallest block max a scale is
+spike (gemmini 0b2cc2c and later: log2_pmax = 0, i.e. shift 0). `shift` (the hardware's log2_pmax) moves the block max
+up into the element format's range: shift 0 leaves MXFP4 only {0, 0.5, 1, 1.5, 2}; shift = emax (2 for E2M1) is OCP's
+top binade. `floor` is the smallest block max a scale is
 computed from; it matters only for all-zero or tiny blocks, and MXQuant's two quantizers disagree:
 
     MXQUANT_FLOOR   1e-38   linear_e2e_wrap/eval_mx_linear_e2e.py::mx_block32_quantize (the simulation; default)
@@ -30,11 +32,12 @@ HARDWARE_FLOOR = 2.0 ** -23
 _MXQUANT_FLOOR = MXQUANT_FLOOR
 
 
-def mxquant(amax: torch.Tensor, floor: float = MXQUANT_FLOOR) -> torch.Tensor:
-    """MXQuant scale: 2^floor(log2 max(amax, floor)), floored at `floor` (with the default, the verbatim
-    numerics of linear_e2e_wrap/eval_mx_linear_e2e.py::mx_block32_quantize)."""
+def mxquant(amax: torch.Tensor, floor: float = MXQUANT_FLOOR, shift: int = 0) -> torch.Tensor:
+    """MXQuant scale: 2^floor(log2 max(amax, floor)), floored at `floor` (with the defaults, the verbatim
+    numerics of linear_e2e_wrap/eval_mx_linear_e2e.py::mx_block32_quantize), then times 2^-shift."""
     sc = torch.pow(2.0, torch.floor(torch.log2(amax.clamp(min=floor))))
-    return sc.clamp(min=floor)
+    sc = sc.clamp(min=floor)
+    return sc * 2.0 ** -shift if shift else sc
 
 
 def ocp(amax: torch.Tensor, emax: int, scale_bits: int = 8) -> torch.Tensor:

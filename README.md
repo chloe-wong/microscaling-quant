@@ -87,6 +87,19 @@ handle = patch(model, rules)             # replace the chosen layers with mxq.nn
 handle.revert()                          # put the originals back
 ```
 
+The attention core (S = Q·Kᵀ, softmax, O = P·V) is not a Linear: HF computes it in one function between the
+projections. A rule whose value is a pair of Schemes `(qk, pv)` chooses attention modules (those holding q_proj and
+k_proj) and runs their core through `mxq.nn.attend`: Q·Kᵀ through `qk`, scale, mask and softmax in fp32, P·V through
+`pv`, each operand quantized once, blocks along its contraction. The model switches to the `"mxq"` attention
+implementation (transformers' AttentionInterface); attention modules no rule chose run sdpa as before, and with no
+such rule nothing about attention changes. The projections stay Linear rules:
+
+```python
+patch(model, [("model.layers.*.self_attn", (fp8, fp8)),   # the core: Q·Kᵀ, P·V
+              (is_attention, None),                       # q/k/v/o_proj: bf16 (or a Scheme)
+              (nn.Linear, fp8)])                          # MLP + lm_head
+```
+
 From TorchAO or Hugging Face (`pip install -e ".[torchao]"`): the same MXLinear behind `torchao.quantize_`, for tools
 that only accept a TorchAO config (Model2MLIR, `transformers.TorchAoConfig`, lm-eval). The config is plain fields
 (defaults: the MX-Gemmini tapeout), so it can go into a checkpoint's config.json; `patch` stays the primary API.
@@ -152,7 +165,8 @@ mxq/
   scheme.py          Scheme(name, a, b, reduce, rows=1): one explicit chain for one matmul, .matmul(A, B); no presets
   nn/                putting Schemes into a model
     _linear.py       MXLinear: one nn.Linear through one Scheme; weight codes cached, token rows chunked (bit-identical)
-    _patch.py        patch(model, rules): a Scheme per layer name or layer type, first match wins; dry_run, revert
+    _patch.py        patch(model, rules): a Scheme per layer name or layer type, first match wins; (qk, pv) for an attention core; dry_run, revert
+    _attention.py    attend(q, k, v, mask, scale, qk, pv): the attention core through two Schemes; the "mxq" attention implementation
     torchao.py       MXQConfig: the same MXLinear behind torchao.quantize_ (optional, needs torchao)
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
 ```
@@ -185,6 +199,7 @@ replaces, on CPU and CUDA.
 | `lut`, `block.lut` | npu-exploration `compiler/codebook.py` (the rule its LUT kernels are bit-exact on spike with): tables, picks, finder, values, decode, 4 formats × G 0/1/2, random and TinyLlama operands, CPU and CUDA (`tests/selftest_codebook_mxq.py` there); MXLinear with a LUT Scheme: every chunk size equals unchunked |
 | `nn.MXLinear` | MXQuant `MXLinearSim.forward`, bit-identical (bf16 inputs, bias, three lengths, two ladders); every chunk size equals unchunked |
 | `nn.patch` | the `rtl_exact` MLP built from `nn.Linear` layers and patched by type: `Y_hw` 65536/65536; rule order, unused-rule and bad-Scheme errors, revert, tied weights |
+| `nn.attend` | the one-head-per-call implementation it replaced (kept verbatim in the tests), bit-identical over 14 Schemes (systolic with the hardware, MXQuant and bf16 ladders, anchor and adder trees, fp64_accum, FP32 passthrough, MXFP4/6, LUTs of G 0/1/2 in four formats, the tapeout chain compiled) x GQA 1:1, 4:1, 8:1, batch 2 with padding, no mask, decode-like Tq 1 and 5, Tq not a multiple of rows, D 64/80/128, unchunked and chunked, CPU and CUDA, and the TinyLlama layer shape; masks of -1e4, -inf and a stray finite value; compiled Arithmetic equals eager on random ladders; FP32 codes with fp64_accum match float64 attention; a Llama with no core rule is unchanged, revert restores sdpa logits exactly; transformers 4.57 and 5.17 |
 | `block.ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
 | `microxcaling/` | upstream microxcaling clone, AST-verbatim and numeric |
 | `rounding` | qtorch (ties away), torch bf16 and gemmini golden `_rne_e8` (RNE), golden `mx_product_quantize_trunc` (truncate) |

@@ -1,7 +1,8 @@
 """The MX-Gemmini configuration the experiments run, and which layers it applies to.
 
-One recipe: `hw_mxfp8_tapeout`. It is MX-Gemmini as the RTL computes it, and every value below is the
-hardware's. More will be added as each is pinned down the same way.
+`hw_mxfp8_tapeout` is MX-Gemmini as the RTL computes it, and every value below is the hardware's.
+`hw_mxfp4_w{W}a{A}` (W, A in 0..2) is MXFP4 W4A4 on every nn.Linear on the same datapath, with the block scale shifted
+down by 2^W (weights) / 2^A (activations): see MXFP4 below. W = A = 0 is the RTL today.
 
     python experiments/llm_ppl.py --rules hw_mxfp8_tapeout --gpus 0,1,2,3
     python experiments/llm_ppl.py --rules hw_mxfp8_tapeout --dry-run    # which layer gets it, then stop
@@ -42,6 +43,16 @@ current RTL but is not yet covered by a capture. A fresh capture would close tha
 
 Two knobs on the operand quantizer are written out rather than left to their defaults, so a change to mxq's
 defaults cannot silently move what this claims.
+
+MXFP4 (`hw_mxfp4_w{W}a{A}`): the datapath above (an FP4 x FP4 product is exact before its truncation), with
+
+    block scale       X = 2^(floor(log2 max(amax, 2^-23)) - shift); shift W for the weights, A for the activations.
+                      Shift 0 is the RTL today (log2_pmax = 0): the block max lands in [1, 2), so the elements only use
+                      {0, 0.5, 1, 1.5, 2}. 2 is OCP's emax for E2M1 (block max in [4, 8), saturating at 6).
+    weights           RNE to E2M1 (quantized offline)
+    activations       bf16 -> E3M1 -> E2M1, both RNE: the FP4 requantizer that produces them on the device
+                      (BF16ScaleRoundToTiny; block.mxgemmini.quantize via=(3, 1))
+    layers            every nn.Linear: q/k/v/o, gate/up/down and lm_head
 """
 from functools import partial
 
@@ -51,7 +62,7 @@ from mxq import Scheme, block, matmul, scale_factor, schedule
 from mxq.nn import is_attention
 from mxq.nn._vector import EXACT
 
-__all__ = ["OPERANDS", "ARITHMETIC", "LADDER", "HW_MXFP8_TAPEOUT", "mlp_and_head", "with_core", "RULES"]
+__all__ = ["OPERANDS", "ARITHMETIC", "LADDER", "HW_MXFP8_TAPEOUT", "mlp_and_head", "hw_mxfp4", "with_core", "RULES"]
 
 #: MX-Gemmini's operand codes: block scale, then the MXFP8_E4M3 element grid, rounded as the RTL rounds.
 OPERANDS = partial(block.mxgemmini.quantize, fmt="MXFP8_E4M3", axis=0,
@@ -66,6 +77,13 @@ LADDER = schedule.HW_FINAL
 
 HW_MXFP8_TAPEOUT = Scheme("hw_mxfp8_tapeout", a=OPERANDS, b=OPERANDS,
                           reduce=partial(matmul.systolic, arith=ARITHMETIC, schedule=LADDER))
+
+
+def hw_mxfp4(w_shift: int, a_shift: int) -> Scheme:
+    """MXFP4 W4A4 on the MX-Gemmini datapath, block scales shifted by 2^-w_shift (weights) and 2^-a_shift (activations)."""
+    q = partial(block.mxgemmini.quantize, fmt="MXFP4", axis=0, rounding_mode="rne", scale_floor=scale_factor.HARDWARE_FLOOR)
+    return Scheme(f"hw_mxfp4_w{w_shift}a{a_shift}", a=partial(q, scale_shift=a_shift, via=(3, 1)), b=partial(q, scale_shift=w_shift),
+                  reduce=partial(matmul.systolic, arith=ARITHMETIC, schedule=LADDER))
 
 
 def mlp_and_head(scheme):
@@ -95,6 +113,8 @@ RULES = {
     # the attention core moved out of sdpa with nothing quantized in it: what --vector softmax does to a model
     # whose rule list has no core, measured on its own
     "hw_mxfp8_tapeout_exactcore": with_core(EXACT, mlp_and_head(HW_MXFP8_TAPEOUT)),
+    # MXFP4 W4A4 with the block scale shifted down by 2^W (weights) / 2^A (activations); w0a0 is the RTL today
+    **{f"hw_mxfp4_w{w}a{a}": [(nn.Linear, hw_mxfp4(w, a))] for w in range(3) for a in range(3)},
 }
 
 try:                                                    # machine-local extras, not part of this repo

@@ -10,6 +10,13 @@ P * expand(X) is bit-identical to Microsoft's `_quantize_mx` (mxq.microxcaling.b
 same rounding mode. Unlike the reference, codes and scales are returned separately so a systolic
 simulation can multiply codes and apply X_A * X_B once per block.
 `rounding_mode` uses microxcaling's names: "even" (RNE), "nearest" (ties away), "floor".
+
+`placement` is where the scale puts the block max (PLACEMENTS):
+    top         the spec: in the format's top binade [2^emax, 2^(emax+1)); a max whose mantissa rounds above
+                max_norm's is clipped to max_norm (scale_factor.ocp)
+    below_top   one binade down, [2^(emax-1), 2^emax): never clips, the top binade unused (scale_factor.ocp_below_top)
+    no_clip     top, except the blocks that would clip go one binade down (scale_factor.ocp_no_clip)
+Only "top" is the OCP spec; the other two keep its element grid and change step 1 alone.
 """
 from typing import Tuple, Union
 
@@ -20,15 +27,25 @@ from . import _driver
 from ..element_quant import microsoft
 from ..element_quant.formats import Format, get
 
-__all__ = ["quantize", "dequantize"]
+__all__ = ["quantize", "dequantize", "PLACEMENTS"]
+
+PLACEMENTS = ("top", "below_top", "no_clip")
 
 
 def quantize(V: torch.Tensor, fmt: Union[str, Format], axis: int = 0, block_size: int = _driver.BLOCK,
-             rounding_mode: str = "even", scale_bits: int = 8) -> Tuple[torch.Tensor, torch.Tensor]:
+             rounding_mode: str = "even", scale_bits: int = 8, placement: str = "top") -> Tuple[torch.Tensor, torch.Tensor]:
     """OCP block quantize V along `axis`. Returns (P codes, X power-of-two scales), float32."""
     f = get(fmt)
+    if placement not in PLACEMENTS:
+        raise ValueError(f"placement must be one of {PLACEMENTS}, got {placement!r}")
+    if placement == "top":
+        scale = lambda amax: scale_factor.ocp(amax, f.emax, scale_bits)                           # noqa: E731
+    elif placement == "below_top":
+        scale = lambda amax: scale_factor.ocp_below_top(amax, f.emax, scale_bits)                 # noqa: E731
+    else:
+        scale = lambda amax: scale_factor.ocp_no_clip(amax, f, rounding_mode, scale_bits)         # noqa: E731
     return _driver.quantize(V, axis, block_size, passthrough=f is None,
-                            scale=lambda amax: scale_factor.ocp(amax, f.emax, scale_bits),          # step 1
+                            scale=scale,                                                           # step 1
                             elem=lambda z: microsoft.quantize(z, f, rounding_mode=rounding_mode))   # step 2
 
 

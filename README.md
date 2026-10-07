@@ -126,13 +126,15 @@ S = float_em.quantize(S, 8, 7, rounding_mode="rne", grid="ieee")   # bf16, as th
 ```
 mxq/
   scale_factor.py    step 1   mxquant(amax) = 2^floor(log2 amax)        ocp(amax, emax) = 2^(floor(log2 amax) - emax)
+                              ocp_below_top = 2 x ocp (never clips)     ocp_no_clip = ocp, 2 x ocp where the block max would clip
   element_quant/     step 2   float_em(x, e, m, rounding_mode=, grid=)  grid: qtorch (MXQuant) | ieee (accumulators) | ocp (MX operands)
                               microsoft: microxcaling _quantize_elemwise, verbatim, reference only
                               formats.py: one table of e, m, emax, max_norm per format
   block/             step 1 + step 2 composed; one interface: P, X = quantize(V, fmt, axis), V_hat = dequantize(P, X, axis)
     mxquant.py       scale_factor.mxquant + float_em grid=qtorch  -> MXQuant's simulation (all reported perplexities)
     mxgemmini.py     scale_factor.mxquant + float_em grid=ocp     -> MX-Gemmini operand codes
-    ocp.py           scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.microxcaling
+    ocp.py           scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.microxcaling;
+                     placement= top (the spec) | below_top | no_clip picks the scale rule, the element grid stays
     lut.py           mxgemmini + mxq.lut                         -> MX-Gemmini LUT operand (2-D; group, max_iters required)
     _driver.py       split along an axis into 32-blocks, pad, run the two steps, reassemble; BLOCK = 32
   lut/               MX-Gemmini's look-up tables (layout from the luts branch, PR #1)

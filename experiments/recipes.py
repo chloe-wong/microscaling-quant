@@ -49,6 +49,7 @@ from torch import nn
 
 from mxq import Scheme, block, matmul, scale_factor, schedule
 from mxq.nn import is_attention
+from mxq.nn._vector import EXACT
 
 __all__ = ["OPERANDS", "ARITHMETIC", "LADDER", "HW_MXFP8_TAPEOUT", "mlp_and_head", "with_core", "RULES"]
 
@@ -91,6 +92,9 @@ RULES = {
     "hw_mxfp8_tapeout_proj": [(nn.Linear, HW_MXFP8_TAPEOUT)],
     "hw_mxfp8_tapeout_core": with_core(HW_MXFP8_TAPEOUT, mlp_and_head(HW_MXFP8_TAPEOUT)),
     "hw_mxfp8_tapeout_all": with_core(HW_MXFP8_TAPEOUT, [(nn.Linear, HW_MXFP8_TAPEOUT)]),
+    # the attention core moved out of sdpa with nothing quantized in it: what --vector softmax does to a model
+    # whose rule list has no core, measured on its own
+    "hw_mxfp8_tapeout_exactcore": with_core(EXACT, mlp_and_head(HW_MXFP8_TAPEOUT)),
 }
 
 try:                                                    # machine-local extras, not part of this repo

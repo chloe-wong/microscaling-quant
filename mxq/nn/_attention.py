@@ -1,11 +1,12 @@
-"""The attention core through two Schemes: S = Q·Kᵀ through `qk`, softmax in fp32, O = P·V through `pv`.
+"""The attention core through two Schemes: S = Q·Kᵀ through `qk`, softmax, O = P·V through `pv`.
 
-    o = attend(q, k, v, mask, scale, qk, pv, chunk=None)       q: B×H×Tq×D, k and v: B×Hkv×Tk×D, o: B×Tq×H×D
+    o = attend(q, k, v, mask, scale, qk, pv, chunk=None, vector=None)   q: B×H×Tq×D, k, v: B×Hkv×Tk×D, o: B×Tq×H×D
 
 Per batch row and KV head, in the order MX-Gemmini runs them, with the group's n query heads side by side:
 
     Qᵀ (D×n·m) --qk.a-->  Kᵀ (D×Tk) --qk.b-->  S = qk.reduce   n·m×Tk fp32   contraction over D (head dims)
-    S·scale + mask, softmax over keys          P               n·m×Tk fp32   host / VPU
+    S·scale + mask, softmax over keys          P               n·m×Tk fp32   host / VPU; vector="bf16": each
+                                                                            step rounded to bf16 (mxq.nn._vector)
     Pᵀ (Tk×n·m) --pv.a-->  V (Tk×D) --pv.b-->  O = pv.reduce   n·m×D  fp32   contraction over the keys
     O cast to q's dtype
 
@@ -25,7 +26,8 @@ anything below 2^103; -inf absorbs everything finite). A key is skipped only whe
 bound on |S·scale| taken from the operands (Σ_k max|Q̂_k|·max|K̂_k| over the dequantized codes, times the scale
 and 2^16 for the reducer's roundings), checked on the mask values in float32; so a -1e4 mask (older HF), a
 finite stray value or a reducer whose scores could reach the mask's ulp all compute every key. The skipped
-scores are filled with the mask values and softmax runs on the whole row, so P is the same row. P·V then
+scores are filled with the mask values (rounded as a computed one would be under vector="bf16") and softmax
+runs on the whole row, so P is the same row. P·V then
 contracts over the kept keys only when P is exactly zero at the skipped ones (checked; it is not for a query
 row the mask removes entirely, as HF pads, whose row is uniform): the codes and scales of Pᵀ and V are sliced
 after quantization at block boundaries, and a block of zero codes adds a tile of zeros, which every reducer's
@@ -43,6 +45,7 @@ import torch
 
 from ..block import BLOCK
 from ..scheme import Scheme
+from ._vector import rounder, softmax
 
 __all__ = ["attend", "register", "NAME"]
 
@@ -66,8 +69,9 @@ def _amax(P, X):
 
 @torch.no_grad()
 def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor], scale: float,
-           qk: Scheme, pv: Scheme, chunk: Optional[int] = None) -> torch.Tensor:
-    """Attention with S = Q·Kᵀ through `qk` and O = P·V through `pv`; scale, additive mask and softmax in fp32.
+           qk: Scheme, pv: Scheme, chunk: Optional[int] = None, vector: Optional[str] = None) -> torch.Tensor:
+    """Attention with S = Q·Kᵀ through `qk` and O = P·V through `pv`; scale, additive mask and softmax in fp32,
+    or with every one of their steps rounded to bf16 when vector="bf16".
 
     mask: None or additive, broadcastable to B×1×Tq×Tk (0 = attend, very negative = do not), as HF's eager mask.
     chunk: query tokens per call, a positive multiple of the schemes' rows. None: the largest multiple of rows
@@ -86,6 +90,7 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[tor
     group = H // Hkv
     step = chunk or max(rows, ELEMENTS_PER_STEP // (group * Tk) // rows * rows)
     tiny = torch.finfo(torch.float32).tiny
+    r = rounder(vector)                                                           # None: no rounding at all
     out = q.new_empty(B, Tq, H, D)
     for b in range(B):
         mb = None
@@ -117,13 +122,15 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[tor
                         else:
                             hi = min(Tk, BLOCK)
                     if lo == 0 and hi == Tk:
-                        S = qk.reduce(*A, *KT) * scale                                # n·m×Tk
+                        S = r(qk.reduce(*A, *KT) * scale)                             # n·m×Tk
                         if mb is not None:
-                            S = (S.view(n, m, Tk) + mb[s0:e0]).view(n * m, Tk)
+                            S = r((S.view(n, m, Tk) + mb[s0:e0]).view(n * m, Tk))
                     else:
-                        S = mb[s0:e0].repeat(n, 1)                                    # skipped keys: the mask
-                        S.view(n, m, Tk)[:, :, lo:hi] += (qk.reduce(*A, KT[0][:, lo:hi], KT[1][:, lo:hi]) * scale).view(n, m, hi - lo)
-                    P = torch.softmax(S, dim=-1)
+                        S = r(mb[s0:e0]).repeat(n, 1)                                 # skipped keys: the mask
+                        S.view(n, m, Tk)[:, :, lo:hi] = r(
+                            r(qk.reduce(*A, KT[0][:, lo:hi], KT[1][:, lo:hi]) * scale).view(n, m, hi - lo)
+                            + mb[s0:e0, lo:hi])
+                    P = softmax(S, vector)
                     if (lo or hi < Tk) and (P[:, :lo].any() or P[:, hi:].any()):
                         lo, hi = 0, Tk                                               # a row with no live key: P is uniform
                     PA = pv.a(P.t().contiguous())                                    # Pᵀ: Tk×n·m, blocks along keys
@@ -145,7 +152,8 @@ def _mxq_attention(module, query, key, value, attention_mask, dropout: float = 0
         raise ValueError("mxq attention is inference only: dropout must be 0")
     qk, pv = core
     scale = scaling if scaling is not None else query.shape[-1] ** -0.5
-    return attend(query, key, value, attention_mask, scale, qk, pv), None
+    return attend(query, key, value, attention_mask, scale, qk, pv,
+                  vector=getattr(module, "_mxq_vector", None)), None
 
 
 def register() -> None:

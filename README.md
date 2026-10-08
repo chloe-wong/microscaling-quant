@@ -100,6 +100,24 @@ patch(model, [("model.layers.*.self_attn", (fp8, fp8)),   # the core: Q·Kᵀ, P
               (nn.Linear, fp8)])                          # MLP + lm_head
 ```
 
+The vector ops between the matmuls run as transformers computes them (RMSNorm and softmax in fp32 inside, bf16
+out) unless `vector` says otherwise. `"bf16"` rounds every step's result to bf16, nearest-even, right after the step;
+the steps and their order stay transformers' own. Each step computes in fp32 and rounds once, which for + − × ÷ is
+exactly a correctly rounding bf16 unit; exp and rsqrt are fp32 library calls rounded once; a row's sum adds in fp32
+and rounds once.
+
+```python
+patch(model, rules, vector="bf16")                    # softmax: S·scale, +mask, S−max, exp, Σ, ÷; RMSNorm: x², mean, +eps, rsqrt, x·r, ×w
+patch(model, rules, vector={"rmsnorm": "bf16"})       # one op; the other stays as transformers has it
+```
+
+Softmax runs in `attend`, so every attention module goes through it: one with no core rule gets the `exact` core
+(no quantization, float64 sums) rather than sdpa, whose fused kernel has no step to round. Every `*RMSNorm` module's
+forward is replaced, after a check that the replacement with no rounding gives the module's own output bit for bit
+(a different formula, Gemma's `1 + weight`, is refused by name). RoPE, SiLU × up and the residual adds are bf16
+tensor ops already, one rounding each, so neither setting changes them. `experiments/llm_ppl.py --vector bf16
+[--vector-ops softmax,rmsnorm] [--dtype float32]` runs it.
+
 From TorchAO or Hugging Face (`pip install -e ".[torchao]"`): the same MXLinear behind `torchao.quantize_`, for tools
 that only accept a TorchAO config (Model2MLIR, `transformers.TorchAoConfig`, lm-eval). The config is plain fields
 (defaults: the MX-Gemmini tapeout), so it can go into a checkpoint's config.json; `patch` stays the primary API.
@@ -166,7 +184,8 @@ mxq/
   nn/                putting Schemes into a model
     _linear.py       MXLinear: one nn.Linear through one Scheme; weight codes cached, token rows chunked (bit-identical)
     _patch.py        patch(model, rules): a Scheme per layer name or layer type, first match wins; (qk, pv) for an attention core; dry_run, revert
-    _attention.py    attend(q, k, v, mask, scale, qk, pv): the attention core through two Schemes; the "mxq" attention implementation
+    _attention.py    attend(q, k, v, mask, scale, qk, pv, vector): the attention core through two Schemes; the "mxq" attention implementation
+    _vector.py       the vector ops' precision: softmax and RMSNorm as transformers has them, or each step rounded to bf16; EXACT core
     torchao.py       MXQConfig: the same MXLinear behind torchao.quantize_ (optional, needs torchao)
 Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization differences, measured
 ```
@@ -200,9 +219,10 @@ replaces, on CPU and CUDA.
 | `nn.MXLinear` | MXQuant `MXLinearSim.forward`, bit-identical (bf16 inputs, bias, three lengths, two ladders); every chunk size equals unchunked |
 | `nn.patch` | the `rtl_exact` MLP built from `nn.Linear` layers and patched by type: `Y_hw` 65536/65536; rule order, unused-rule and bad-Scheme errors, revert, tied weights |
 | `nn.attend` | the one-head-per-call implementation it replaced (kept verbatim in the tests), bit-identical over 14 Schemes (systolic with the hardware, MXQuant and bf16 ladders, anchor and adder trees, fp64_accum, FP32 passthrough, MXFP4/6, LUTs of G 0/1/2 in four formats, the tapeout chain compiled) x GQA 1:1, 4:1, 8:1, batch 2 with padding, no mask, decode-like Tq 1 and 5, Tq not a multiple of rows, D 64/80/128, unchunked and chunked, CPU and CUDA, and the TinyLlama layer shape; masks of -1e4, -inf and a stray finite value; compiled Arithmetic equals eager on random ladders; FP32 codes with fp64_accum match float64 attention; a Llama with no core rule is unchanged, revert restores sdpa logits exactly; transformers 4.57 and 5.17 |
+| `nn` vector (`vector="bf16"`) | softmax and RMSNorm equal step-by-step references rounded with eager cast pairs; with no rounding, RMSNorm equals `LlamaRMSNorm` bit for bit (bf16 and fp32) and softmax equals `torch.softmax`; `attend` equals a per-head reference, every chunk size and compiled Arithmetic included; `vector=None` leaves a TinyLlama run's nll identical to all digits; revert restores the logits exactly; the exact core matches sdpa to the order of fp32 sums |
 | `block.ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
 | `microxcaling/` | upstream microxcaling clone, AST-verbatim and numeric |
-| `rounding` | qtorch (ties away), torch bf16 and gemmini golden `_rne_e8` (RNE), golden `mx_product_quantize_trunc` (truncate) |
+| `rounding` | qtorch (ties away), torch bf16 and gemmini golden `_rne_e8` (RNE), golden `mx_product_quantize_trunc` (truncate); `rounding.bf16` equals the eager cast on subnormals, ±0, the largest finite values and Inf |
 | `scale_factor` | MXQuant `mx_block32_quantize` scales; Microsoft `_quantize_mx` shared exponents |
 | `element_quant.formats` | microxcaling `ElemFormat` table |
 | `arith` | gemmini golden `fp_add_exact`, `bf16_accum_add`, `mx_product_quantize_trunc`, `mx_product_saturate` |

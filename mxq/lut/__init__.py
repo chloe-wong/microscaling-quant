@@ -13,6 +13,7 @@ columns of B, rows of a requantized C), each table spanning all of K. The operan
 
     formats   decode / encode element codes, values(fmt) = what a table may hold, finder
     kmeans    tables, pick, lookup
+    raw       tables_raw, pick_raw, finder_raw: the proposed raw-value finder, opt-in (block.lut fit= / pick=)
 
 Formats: FORMATS (MXFP6_E3M2, MXFP6_E2M3, MXFP8_E5M2, MXFP8_E4M3 for the quad PE). The rule is npu-exploration's
 compiler/codebook.py, whose kernels are bit-exact on spike; the layout (mxq/lut, mxq/block/lut.py) is from
@@ -20,5 +21,7 @@ the luts branch (PR #1).
 """
 from .formats import FORMATS, SIZE, decode, encode, finder, values
 from .kmeans import lookup, pick, tables
+from .raw import finder_raw, pick_raw, tables_raw
 
-__all__ = ["FORMATS", "SIZE", "decode", "encode", "finder", "values", "tables", "pick", "lookup"]
+__all__ = ["FORMATS", "SIZE", "decode", "encode", "finder", "values", "tables", "pick", "lookup",
+           "tables_raw", "pick_raw", "finder_raw"]

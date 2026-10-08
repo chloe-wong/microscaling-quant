@@ -21,7 +21,7 @@ Requires torchao (`pip install microscaling-quant[torchao]`); `import mxq` does 
 """
 from dataclasses import asdict, dataclass, field
 from functools import partial
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import torch
 from torch import nn
@@ -54,7 +54,9 @@ class MXQConfig(AOBaseConfig):
     chunk        MXLinear's token chunk (None: its default)
     lut          None: fmt on its element grid. {"group": G, "max_iters": n}: both operands through MX-Gemmini's
                  LUT, block.lut.quantize (one 16-entry table per 2^G rows of A / columns of B); both keys
-                 required, fmt one of lut.FORMATS, no via
+                 required, fmt one of lut.FORMATS, no via. Optional "fit" / "pick": "codes" (absent: the chip
+                 today) or "raw", the proposed raw-value finder (block.lut, mxq.lut.raw), e.g.
+                 {"group": 1, "max_iters": 50, "fit": "raw", "pick": "raw"}
     """
     fmt: str = "MXFP8_E4M3"
     rounding_mode: str = "rne"
@@ -69,7 +71,7 @@ class MXQConfig(AOBaseConfig):
     compiled: Optional[bool] = None
     chunk: Optional[int] = None
     name: str = "mxq"
-    lut: Optional[Dict[str, int]] = None
+    lut: Optional[Dict[str, Union[int, str]]] = None
 
     def __post_init__(self):
         if get(self.fmt) is None:
@@ -92,10 +94,12 @@ class MXQConfig(AOBaseConfig):
         if self.chunk is not None and (not _is_int(self.chunk) or self.chunk < 1):
             raise ValueError(f"MXQConfig: chunk {self.chunk!r} must be a positive integer or None")
         if self.lut is not None:
-            if not isinstance(self.lut, dict) or set(self.lut) != {"group", "max_iters"} or \
-                    not all(_is_int(v) and v >= 0 for v in self.lut.values()):
+            if not isinstance(self.lut, dict) or not {"group", "max_iters"} <= set(self.lut) <= \
+                    {"group", "max_iters", "fit", "pick"} or \
+                    not all(_is_int(self.lut[k]) and self.lut[k] >= 0 for k in ("group", "max_iters")) or \
+                    not all(self.lut.get(k, "codes") in block.lut.FITS for k in ("fit", "pick")):
                 raise ValueError(f"MXQConfig: lut {self.lut!r} must be {{'group': G, 'max_iters': n}}, "
-                                 "non-negative integers")
+                                 "non-negative integers, plus optionally 'fit' / 'pick': 'codes' or 'raw'")
             if get(self.fmt).name not in lut.FORMATS:
                 raise ValueError(f"MXQConfig: fmt {self.fmt} has no LUT on MX-Gemmini; LUT formats: "
                                  f"{', '.join(lut.FORMATS)}")
@@ -119,7 +123,8 @@ class MXQConfig(AOBaseConfig):
         else:
             q = partial(block.lut.quantize, fmt=self.fmt, axis=0, block_size=self.block_size,
                         rounding_mode=self.rounding_mode, scale_floor=self.scale_floor,
-                        group=self.lut["group"], max_iters=self.lut["max_iters"])
+                        group=self.lut["group"], max_iters=self.lut["max_iters"],
+                        fit=self.lut.get("fit", "codes"), pick=self.lut.get("pick", "codes"))
             rows = 1 << self.lut["group"]
         if self.reduce == "hardware":
             arith = matmul.MXGEMMINI(*self.prod, prod_floor=self.prod_floor)

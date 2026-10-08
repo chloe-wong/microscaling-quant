@@ -49,6 +49,28 @@ I = lut.finder(codes, T, "MXFP6_E3M2", group=1)                # the chip's find
 In a Scheme, pass `rows=2**G` so MXLinear keeps each group of tokens in one call; `MXQConfig(lut={"group": G,
 "max_iters": n})` does this for you.
 
+**Raw-value finder (proposed hardware, off by default).** The chip rounds each value to an FP6 code before the
+table is fitted and before its index is picked. The proposed change fits the tables on, and picks the index from,
+the scaled value V / X itself (`mxq.lut.raw`). On TinyLlama (MXFP6_E3M2, G = 1) it takes perplexity from 9.62 to 8.18
+with every table fitted on its own operand, and from 9.61 to 8.29 with activation tables calibrated in advance (bf16
+7.20). Nothing changes unless you ask for it: `fit` and `pick` default to `"codes"`, the chip today, bit for bit.
+To turn it on, set both to `"raw"`:
+
+```python
+P, X = block.lut.quantize(V, "MXFP6_E3M2", axis=0, block_size=32, rounding_mode="rne", scale_floor=2**-23,
+                          group=1, max_iters=50, fit="raw", pick="raw")
+MXQConfig(fmt="MXFP6_E3M2", lut={"group": 1, "max_iters": 50, "fit": "raw", "pick": "raw"})
+R = V / X.repeat_interleave(32, 0)[:V.shape[0]]                # the steps, on K×n raw values
+T = lut.tables_raw(R, "MXFP6_E3M2", group=1, max_iters=50)     # tables fitted on the raw values
+I = lut.pick_raw(R, T, group=1)                                # host pick: exact, by the midpoints
+I = lut.finder_raw(R, T, "MXFP6_E3M2", group=1)                # the proposed finder's RTL arithmetic (E3M2 only)
+```
+
+`pick="raw"` is software for an operand the host sends; for one the chip requantizes it needs the new finder,
+which `finder_raw` models bit for bit: an 8-bit key `2·floor(32·raw) + sticky` against thresholds
+`32·(a + b) + 1`, exact for |raw| < 2 and entries within [−2, 2]. Mixed settings are not design points (raw fit with
+code pick measured 11.28). The measurements and the hardware requirement: `experiments/lut_fit_ppl.py`.
+
 A matmul on the codes is a reducer (the order of the additions) plus an Arithmetic (the rounding at each step)
 plus a schedule (the accumulator format at each position). Every piece is named explicitly; there are no presets:
 
@@ -166,11 +188,13 @@ mxq/
     mxgemmini.py     scale_factor.mxquant + float_em grid=ocp     -> MX-Gemmini operand codes
     ocp.py           scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.microxcaling;
                      placement= top (the spec) | below_top | no_clip picks the scale rule, the element grid stays
-    lut.py           mxgemmini + mxq.lut                         -> MX-Gemmini LUT operand (2-D; group, max_iters required)
+    lut.py           mxgemmini + mxq.lut                         -> MX-Gemmini LUT operand (2-D; group, max_iters required;
+                                                                    fit= / pick= "raw" opt into the raw-value finder)
     _driver.py       split along an axis into 32-blocks, pad, run the two steps, reassemble; BLOCK = 32
   lut/               MX-Gemmini's look-up tables (layout from the luts branch, PR #1)
     formats.py       decode / encode element codes; values(fmt): what the finder tells apart; finder: the chip's index
     kmeans.py        tables (weighted k-means on distinct codes, snapped, padded), pick (host nearest), lookup
+    raw.py           tables_raw, pick_raw, finder_raw: the proposed raw-value finder, opt-in via block.lut fit= / pick=
   microxcaling/      Microsoft's microxcaling package, verbatim (MIT). Oracle only; see microxcaling/UPSTREAM.md
   rounding/          ties_away | rne | truncate, on float32 bit patterns (round_bits) or integers (round_int)
   arith.py           exact_add, truncate_significand, saturate_product: what a PE does between quantizations

@@ -28,7 +28,7 @@ from torch import nn
 from torchao.core.config import AOBaseConfig
 from torchao.quantization.transform_module import register_quantize_module_handler
 
-from .. import block, lut, matmul
+from .. import block, lut, matmul, scale_factor
 from .._fp64_accum import fp64_accum
 from ..element_quant.formats import get
 from ..scheme import Scheme
@@ -58,7 +58,7 @@ class MXQConfig(AOBaseConfig):
     """
     fmt: str = "MXFP8_E4M3"
     rounding_mode: str = "rne"
-    scale_floor: float = 2.0 ** -23
+    scale_floor: float = scale_factor.HARDWARE_FLOOR
     via: Optional[List[int]] = None
     block_size: int = 32
     prod: List[int] = field(default_factory=lambda: [4, 3])

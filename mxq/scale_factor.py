@@ -35,7 +35,6 @@ __all__ = ["mxquant", "ocp", "ocp_below_top", "ocp_no_clip", "MXQUANT_FLOOR", "H
 MXQUANT_FLOOR = 1e-38
 #: floor used by MXQuant's end_to_end_linear quantizer and by the MX-Gemmini requantizer (FLT_EPSILON).
 HARDWARE_FLOOR = 2.0 ** -23
-_MXQUANT_FLOOR = MXQUANT_FLOOR
 
 
 def mxquant(amax: torch.Tensor, floor: float = MXQUANT_FLOOR) -> torch.Tensor:

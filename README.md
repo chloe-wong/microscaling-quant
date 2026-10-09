@@ -10,6 +10,8 @@ Requires Python >= 3.10 and torch.
 git clone git@github.com:chloe-wong/microscaling-quant.git
 cd microscaling-quant
 pip install -e .            # inside the conda env you run experiments in
+pip install -e ".[hf]"      # + transformers: the attention core and vector="bf16" in mxq.nn
+pip install -e ".[experiments]"   # + transformers, datasets: experiments/llm_ppl.py
 python -c "import mxq"
 ```
 

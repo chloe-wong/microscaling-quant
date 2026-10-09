@@ -11,6 +11,8 @@ dependencies = ["torch"]
 
 [project.optional-dependencies]
 torchao = ["torchao>=0.16"]      # mxq.nn.torchao: MXQConfig behind torchao.quantize_
+hf = ["transformers>=4.57"]      # mxq.nn attention core (patch with a (qk, pv) rule) and vector="bf16"
+experiments = ["transformers>=4.57", "datasets>=4.4"]   # experiments/llm_ppl.py
 
 [tool.setuptools.packages.find]
 include = ["mxq*"]

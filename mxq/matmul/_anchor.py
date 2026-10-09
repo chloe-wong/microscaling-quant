@@ -19,7 +19,7 @@ to 0, where MXGEMMINI's lane overflows to Inf and keeps NaN.
 K tail: missing products are zeros, as hardware feeds them.
 
 Speed: with a compiled Arithmetic (mxq.matmul.compiled) a whole reduction, every tree and every level, is
-one compiled function, as systolic's fused_reduction is. Same operations in the same order; the terms are a
+one compiled function (`Arithmetic.fuse`), as systolic's fused_reduction is. Same operations in the same order; the terms are a
 list of M x N tensors rather than one stacked tensor, so nothing is written to memory between steps.
 """
 import math
@@ -83,18 +83,13 @@ def _reduction(A, B, la, lb, per_tree, width, drop, headroom, arith):
     return c
 
 
-_COMPILED: dict = {}
-
-
 def _fused(arith, per_tree, width, drop, headroom):
-    """`_reduction` compiled for one configuration, built once and reused; None for an uncompiled Arithmetic."""
-    if getattr(arith, "fused_reduction", None) is None:
+    """`_reduction` compiled for one configuration by `arith.fuse`, built once and kept with the Arithmetic;
+    None for an Arithmetic that does not fuse."""
+    if getattr(arith, "fuse", None) is None:
         return None
-    key = (id(arith), tuple((e, m, tuple(b)) for e, m, b in per_tree), width, drop, headroom)
-    if key not in _COMPILED:
-        body = lambda A, B, la, lb: _reduction(A, B, la, lb, per_tree, width, drop, headroom, arith)
-        _COMPILED[key] = (arith, torch.compile(body, dynamic=False))           # arith held: its id stays unique
-    return _COMPILED[key][1]
+    key = ("anchor_tree", tuple((e, m, tuple(b)) for e, m, b in per_tree), width, drop, headroom)
+    return arith.fuse(key, lambda A, B, la, lb: _reduction(A, B, la, lb, per_tree, width, drop, headroom, arith))
 
 
 def anchor_tree(P_A: torch.Tensor, X_A: torch.Tensor, P_B: torch.Tensor, X_B: torch.Tensor,

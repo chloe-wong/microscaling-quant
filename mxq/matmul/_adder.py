@@ -7,7 +7,7 @@ arrangement of the nodes into a tree is not checked against any hardware: no RTL
 fixed, (0,1), (2,3), ..., because a floating-point tree's result depends on it. K tail: exact zeros.
 
 Speed: with a compiled Arithmetic (mxq.matmul.compiled) a whole reduction, products and every level, is one
-compiled function, as systolic's fused_reduction is. Same operations in the same order.
+compiled function (`Arithmetic.fuse`), as systolic's fused_reduction is. Same operations in the same order.
 """
 from typing import Sequence, Tuple
 
@@ -30,18 +30,13 @@ def _reduction(A, B, schedule, size, arith):
     return p[0]
 
 
-_COMPILED: dict = {}
-
-
 def _fused(arith, schedule, size):
-    """`_reduction` compiled for one (schedule, size), built once and reused; None for an uncompiled Arithmetic."""
-    if getattr(arith, "fused_reduction", None) is None:
+    """`_reduction` compiled for one (schedule, size) by `arith.fuse`, built once and kept with the Arithmetic;
+    None for an Arithmetic that does not fuse."""
+    if getattr(arith, "fuse", None) is None:
         return None
-    key = (id(arith), tuple(tuple(t) for t in schedule), size)
-    if key not in _COMPILED:
-        sched = list(key[1])
-        _COMPILED[key] = (arith, torch.compile(lambda A, B: _reduction(A, B, sched, size, arith), dynamic=False))
-    return _COMPILED[key][1]
+    sched = [tuple(t) for t in schedule]
+    return arith.fuse(("adder_tree", tuple(sched), size), lambda A, B: _reduction(A, B, sched, size, arith))
 
 
 def adder_tree(P_A: torch.Tensor, X_A: torch.Tensor, P_B: torch.Tensor, X_B: torch.Tensor,

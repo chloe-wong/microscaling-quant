@@ -71,12 +71,13 @@ def _holds_core(module: nn.Module) -> bool:
 def _smoke(scheme: Scheme) -> None:
     g = torch.Generator().manual_seed(0)
     n = 2 * scheme.rows                                                         # a LUT activation: two whole groups
-    scheme.matmul(torch.randn(32, n, generator=g), torch.randn(32, n, generator=g))
+    K = 3 * scheme.block_size                                                   # three blocks: matmul checks the scales
+    scheme.matmul(torch.randn(K, n, generator=g), torch.randn(K, n, generator=g))
 
 
 def _smoke_core(qk: Scheme, pv: Scheme) -> None:
     g = torch.Generator().manual_seed(0)
-    t = 64 * max(qk.rows, pv.rows)                                              # whole 32-blocks of keys, whole groups
+    t = 2 * max(qk.block_size, pv.block_size) * max(qk.rows, pv.rows)          # whole key blocks, whole groups
     q, k, v = (torch.randn(1, n, t, 32, generator=g) for n in (2, 1, 1))
     attend(q, k, v, None, 32 ** -0.5, qk, pv)
 

@@ -1,7 +1,7 @@
 """Fitting the tables and picking indices, for a K×n tensor of block codes: one table per 2^G columns.
 
     T = tables(P, fmt, group=G, max_iters=50)   ceil(n / 2^G) × SIZE values, each row sorted ascending
-    I = pick(P, T, group=G)                     K×n: each code's nearest entry, ties to the lower index
+    I = pick(P, T, group=G)                     K×n: each code's nearest entry, ties to the lower index (any width)
     P_lut = lookup(I, T, group=G)
 
 A table is fitted to the codes of its group (2^G columns, all of K; when n is not a multiple of 2^G the last
@@ -123,15 +123,15 @@ def tables(P: torch.Tensor, fmt, *, group: int, max_iters: int) -> torch.Tensor:
 
 
 def pick(P: torch.Tensor, T: torch.Tensor, *, group: int) -> torch.Tensor:
-    """Each code's nearest entry in its column group's table, ties to the lower index. K×n int64."""
+    """Each code's nearest entry in its column group's table, ties to the lower index. K×n int64.
+    Any table width of two or more (one row per group, ascending); the chip's is SIZE."""
     ng = _check(P, group)
-    if T.shape != (ng, SIZE):
-        raise ValueError(f"mxq.lut.pick: {P.shape[1]} columns at group {group} need ({ng}, {SIZE}) tables, "
-                         f"got {tuple(T.shape)}")
-    rows = T.to(P.device, torch.float32)[torch.arange(P.shape[1], device=P.device) >> group]   # n×SIZE, ascending
+    _check_tables(T, ng, P.shape[1], group, "pick")
+    size = T.shape[1]
+    rows = T.to(P.device, torch.float32)[torch.arange(P.shape[1], device=P.device) >> group]   # n×size, ascending
     v = P.to(torch.float32).t().contiguous()                                                   # n×K
-    # the nearest of 16 sorted entries is one of the two around v; every difference here is exact in float32
-    hi = torch.searchsorted(rows, v).clamp(1, SIZE - 1)
+    # the nearest of the sorted entries is one of the two around v; every difference here is exact in float32
+    hi = torch.searchsorted(rows, v).clamp(1, size - 1)
     lo = hi - 1
     d_lo = (v - rows.gather(1, lo)).abs()
     d_hi = (rows.gather(1, hi) - v).abs()
@@ -139,9 +139,14 @@ def pick(P: torch.Tensor, T: torch.Tensor, *, group: int) -> torch.Tensor:
 
 
 def lookup(I: torch.Tensor, T: torch.Tensor, *, group: int) -> torch.Tensor:
-    """The values the indices name: K×n float32."""
+    """The values the indices name: K×n float32. Any table width (one row per group)."""
     ng = _check(I, group)
-    if T.shape != (ng, SIZE):
-        raise ValueError(f"mxq.lut.lookup: needs ({ng}, {SIZE}) tables, got {tuple(T.shape)}")
-    rows = T.to(I.device, torch.float32)[torch.arange(I.shape[1], device=I.device) >> group]   # n×SIZE
+    _check_tables(T, ng, I.shape[1], group, "lookup")
+    rows = T.to(I.device, torch.float32)[torch.arange(I.shape[1], device=I.device) >> group]   # n×width
     return rows.gather(1, I.t().contiguous()).t().contiguous()
+
+
+def _check_tables(T: torch.Tensor, ng: int, n: int, group: int, who: str) -> None:
+    if T.ndim != 2 or T.shape[0] != ng or T.shape[1] < 2:
+        raise ValueError(f"mxq.lut.{who}: {n} columns at group {group} need ({ng}, width) tables with width >= 2, "
+                         f"got {tuple(T.shape)}")

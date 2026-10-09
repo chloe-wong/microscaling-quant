@@ -129,7 +129,7 @@ class MXQConfig(AOBaseConfig):
                         size=self.size, block_size=self.block_size)
         else:
             r = partial(fp64_accum, block_size=self.block_size)
-        s = Scheme(self.name, a=q, b=q, reduce=r, rows=rows)
+        s = Scheme(self.name, a=q, b=q, reduce=r, rows=rows, block_size=self.block_size)
         self.__dict__.setdefault("_scheme", {})[compile] = (asdict(self), s)   # not a field: invisible to asdict
         return s
 

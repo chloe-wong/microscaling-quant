@@ -1,17 +1,21 @@
 """Arithmetic helpers that pair with float_em: what a PE does between quantizations.
-Bit-identical to the gemmini golden (`fp8_matmul_model.py`) functions named in each docstring.
 
-    exact_add(a, b, e, m)         a + b exactly, then one rounding to float(e, m)        golden fp_add_exact, bf16_accum_add
-    truncate_significand(x, m)    keep m fraction bits of |x|'s significand, drop the rest golden mx_product_quantize_trunc, step 1
-    flush_product(x, floor_exp)   zero a product below 2^floor_exp                        MxFPMul PROD_FLOOR
-    saturate_product(x, e, m)     clamp a product to the PE's largest float(e, m) value   golden mx_product_saturate
+Generic: every width, threshold and value is an argument; no chip's numbers are written here. A chip's
+values live in its recipe (matmul.MXGEMMINI sets MX-Gemmini's floor and saturation from spike's model).
+Each is bit-identical to the function of the reference model (gemmini-rocc-tests `fp8_matmul_model.py`,
+extracted as npu-exploration rtl_exact/mxmesh/fp8.py) named on its line, with the chip's arguments.
+
+    exact_add(a, b, e, m)         a + b exactly, then one rounding to float(e, m)          fp_add_exact, bf16_accum_add
+    truncate_significand(x, m)    keep m fraction bits of |x|'s significand, drop the rest   mx_product_quantize_trunc, step 1
+    flush_product(x, floor_exp)   zero a value below 2^floor_exp                             mx_product_quantize_trunc, flush
+    saturate(x, limit, value)     |x| > limit becomes sign(x) * value                        mx_product_saturate
 """
 import torch
 
 from . import rounding
 from .element_quant import float_em
 
-__all__ = ["exact_add", "truncate_significand", "flush_product", "saturate_product"]
+__all__ = ["exact_add", "truncate_significand", "flush_product", "saturate"]
 
 
 def _fits_float32(e: int, m: int) -> bool:
@@ -62,10 +66,10 @@ def _round_pair(s: torch.Tensor, t: torch.Tensor, e: int, m: int) -> torch.Tenso
 
 
 def exact_add(a: torch.Tensor, b: torch.Tensor, e: int, m: int, rounding_mode: str = "rne", grid: str = "ieee") -> torch.Tensor:
-    """a + b computed exactly, then quantized once to float(e, m). Golden `fp_add_exact` / `bf16_accum_add`.
+    """a + b computed exactly, then quantized once to float(e, m). Reference model `fp_add_exact` / `bf16_accum_add`.
 
     Precondition: a and b are already on a float grid with significands of at most 24 bits (any float_em output,
-    any float32). A zero addend returns the OTHER operand unchanged (golden short-circuit), so 0 + -0 -> -0,
+    any float32). A zero addend returns the OTHER operand unchanged (the reference model's short-circuit), so 0 + -0 -> -0,
     not +0.
 
     Three paths, chosen on (e, m) alone so the choice is fixed when a reduction is compiled:
@@ -102,7 +106,7 @@ def exact_add(a: torch.Tensor, b: torch.Tensor, e: int, m: int, rounding_mode: s
 def truncate_significand(x: torch.Tensor, m: int) -> torch.Tensor:
     """|x| = s * 2^E with s in [1, 2): keep m fraction bits of s, drop the rest (toward zero). No exponent clamp:
     a float32 subnormal is normalised first, so it is truncated at its own leading 1 and not flushed.
-    Zeros, Inf and NaN pass through. Golden `mx_product_quantize_trunc` before its saturation step (MxFPMul).
+    Zeros, Inf and NaN pass through. Reference model `mx_product_quantize_trunc` before its saturation step.
     """
     x = x.to(torch.float32)
     ax = x.abs()
@@ -114,31 +118,20 @@ def truncate_significand(x: torch.Tensor, m: int) -> torch.Tensor:
 
 
 def flush_product(x: torch.Tensor, floor_exp: int) -> torch.Tensor:
-    """Zero a product below 2^floor_exp (MxFPMul PROD_FLOOR, 2^-16 for the (4, 3) product)."""
+    """Zero a value whose magnitude is below 2^floor_exp (as +0); everything else passes unchanged.
+    matmul.MXGEMMINI passes spike's -16 (mx_fp_math.h:63)."""
     x = x.to(torch.float32)
     return torch.where(x.abs() < 2.0 ** floor_exp, torch.zeros_like(x), x)
 
 
-def saturate_product(x: torch.Tensor, e: int, m: int) -> torch.Tensor:
-    """MxPEOutToRaw saturation after the product truncation. Golden `mx_product_saturate`.
+def saturate(x: torch.Tensor, limit: float, value: float) -> torch.Tensor:
+    """sign(x) * value where |x| > limit, x elsewhere. Reference model `mx_product_saturate` given its
+    (limit, value); matmul.MXGEMMINI passes spike's pair (mx_fp_math.h:42-56).
 
-    A product above the format's largest value becomes that value. hardfloat treats biased exponent 2^e - 1 as
-    special, so for e4m3 the largest value is mantissa 2^m - 2 at unbiased exponent bias + 1, i.e. 448 (the
-    format max, validated against hardware); every other (e, m) uses the IEEE max-normal, mantissa 2^m - 1 at
-    exponent bias, unchecked against hardware. Values up to the largest pass through unchanged.
-
-    Before 2026-10-06 a saturated value of any other (e, m) was written as the golden's general formula,
-    (2 - 2^(1-m)) * 2^(bias+1): about twice the format's largest value, and for e = 8 above float32's max, so
-    the e8m7 (bf16) product crashed when the constant was built. Nothing a 32-element MX block multiplies
-    exceeds 4, so no validated result depended on it.
-    Edge cases, as in the golden: +-Inf saturates (Inf > max_normal); NaN stays NaN; -0 becomes +0 (sign(-0) = 0).
+    `value` may be smaller or larger than `limit` (a saturated value need not be the largest one passed), and
+    may be Inf. Edge cases, as in the reference model: +-Inf counts as above any finite limit; NaN stays NaN;
+    -0 becomes +0 (the result is formed as sign(x) * magnitude, and sign(-0) is 0).
     """
     x = x.to(torch.float32)
-    bias = float_em.bias(e)
-    is_mx_fp8 = (e == 4 and m == 3)
-    emax = bias + 1 if is_mx_fp8 else bias
-    scale = float(2 ** m)
-    max_mant = (2 ** m - 2) if is_mx_fp8 else (2 ** m - 1)
-    max_normal = (2.0 ** emax) * (1.0 + max_mant / scale)
     ax = x.abs()
-    return torch.sign(x) * torch.where(ax > max_normal, torch.full_like(ax, max_normal), ax)
+    return torch.sign(x) * torch.where(ax > limit, torch.full_like(ax, value), ax)

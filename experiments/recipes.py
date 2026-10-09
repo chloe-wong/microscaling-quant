@@ -36,7 +36,7 @@ How far this is proven. The MX-Gemmini datapath here -- product, accumulate, cro
 bit-identical to a real hardware capture: all 65536 elements of npu-exploration
 `rtl_exact/fixture_llama_mlp.npz::Y_hw`. That capture was frozen 2026-09-06, four days before the RTL moved
 its element rounding to RNE, so the capture itself was taken with ties-away operands. The difference has been
-traced to that one convention and nothing else: forcing npu-exploration's golden back to ties-away reproduces
+traced to that one convention and nothing else: forcing npu-exploration's reference back to ties-away reproduces
 the same 65536 of 65536. So the datapath is proven against hardware; the operand rounding above follows the
 current RTL but is not yet covered by a capture. A fresh capture would close that.
 

@@ -7,7 +7,7 @@ name = "microscaling-quant"
 version = "0.1.0"
 description = "Granular microscaling (MX) quantization ops. mxq."
 requires-python = ">=3.10"
-dependencies = ["torch"]
+dependencies = ["torch>=2.4"]      # torch.library.custom_op (mxq.matmul.compiled)
 
 [project.optional-dependencies]
 torchao = ["torchao>=0.16"]      # mxq.nn.torchao: MXQConfig behind torchao.quantize_

@@ -8,17 +8,18 @@ The reducer (matmul.systolic) decides the ORDER of these calls; an Arithmetic de
 at each. Two Arithmetics are defined here, each built only from named mxq calls (float_em, arith); no rounding
 rule is written in this file. Stage by stage:
 
-    stage                 MXQUANT(prod_e, prod_m)                          MXGEMMINI(prod_e=4, prod_m=3)
+    stage                 MXQUANT(prod_e, prod_m)                          MXGEMMINI(prod_e=4, prod_m=3, prod_floor=-16)
     product(a, b)         fp32 a*b, then float_em ties_away on the         arith.truncate_significand to prod_m fraction
-                          qtorch grid to float(prod_e, prod_m)             bits (flushed below 2^-16), then arith.saturate_product
-                                                                           (448 for e4m3)
+                          qtorch grid to float(prod_e, prod_m)             bits, arith.flush_product below 2^prod_floor
+                                                                           (spike's -16), then arith.saturate with spike's
+                                                                           (limit, value) (e4m3: above 448 -> 448)
     acc_add(S, p, e, m)   fp32 S+p, then float_em ties_away on the         S and p each rounded rne on the ieee grid to
                           qtorch grid to float(e, m)                       float(e, m); arith.exact_add: exact sum, one rne
                                                                            rounding to float(e, m)
     tile_add(C, tile)     fp32 C+tile, no rounding                         C and tile each rounded rne to bf16 (8, 7);
                                                                            arith.exact_add to bf16
     matches               MXQuant MXLinearSim._simulate_atw                npu-exploration rtl_exact Y_hw (65536/65536) and
-                          (complete_integration_e2e), bit-identical         the gemmini golden fp8_matmul_model, bit-identical
+                          (complete_integration_e2e), bit-identical         its reference model fp8_matmul_model, bit-identical
     validated for         6 operand formats, 14,820 configs                MXFP8_E4M3 operands only
 
 The MXQUANT lane add must be a plain fp32 add: MXQuant rounds the fp32 sum, not the exact sum. The two differ
@@ -75,22 +76,59 @@ def MXQUANT(prod_e: int, prod_m: int) -> Arithmetic:
 #: the bf16 lane and tile rounding, on the bit pattern; why not a cast pair: see rounding.bf16
 _bf16_rne = rounding.bf16
 
+# MX-Gemmini's chip values, from spike's functional model (the source of truth for these recipes): libgemmini
+# 92fae92 as built by npu-exploration's toolchain, software/libgemmini/mx_fp_math.h and gemmini.cc. The product
+# format (prod_e, prod_m) is spike's (prod_e, prod_m) = (4, 3) (gemmini.cc:1401). b = 2^(prod_e - 1) - 1.
 
-def MXGEMMINI(prod_e: int = 4, prod_m: int = 3, prod_floor: Optional[int] = -16) -> Arithmetic:
-    """MX-Gemmini PE column (npu-exploration/rtl_exact, gemmini golden fp8_matmul_model.py):
-    product significand truncated to prod_m bits, flushed below 2^prod_floor, then PE saturation (`mx_product_quantize_trunc`);
-    both addends rounded RNE to the lane's float(e, m), added exactly, rounded once (`fp_add_exact(fp_quantize_rne, fp_quantize_rne)`);
-    cross-block: both rounded to bf16, added exactly, rounded to bf16 (`bf16_accum_add(C, q_bf16_rne(tile))`).
+#: products below 2^PROD_FLOOR flush to +0, for every product format (mx_fp_math.h:63). The RTL's floor depends on
+#: the product format (MxGen MxFPMul.scala:60); spike's, followed here, does not.
+PROD_FLOOR = -16
+
+
+def _saturation(prod_e: int, prod_m: int) -> Tuple[float, float]:
+    """(limit, value) of spike's product saturation, mx_product_saturate (mx_fp_math.h:42-56): a product above
+    max_normal becomes sign * sat_val.
+
+        max_normal  e4m3: 448 (mantissa 2^m - 2 at exponent b + 1, l.44-48); any other: 2^b * (2 - 2^-m)
+        sat_val     2^(b + 1) * (1 + (2^m - 2) / 2^m) (l.49-50): e4m3 448, e4m4 480, e5m2 98304, e3m4 30
+
+    For prod_e = 8, sat_val is above float32's range and ldexpf returns Inf; so does this."""
+    b = float_em.bias(prod_e)
+    fp8 = (prod_e, prod_m) == (4, 3)
+    limit = 2.0 ** (b + 1 if fp8 else b) * (1 + ((2 ** prod_m - 2) if fp8 else (2 ** prod_m - 1)) / 2 ** prod_m)
+    value = 2.0 ** (b + 1) * (1 + (2 ** prod_m - 2) / 2 ** prod_m)
+    if value > torch.finfo(torch.float32).max:
+        value = float("inf")
+    return limit, value
+
+
+def _unsigned_zero(x: Tensor) -> Tensor:
+    """-0 becomes +0: spike's lane and bf16 roundings never return a negative zero (fp_quantize_rne_scalar for a zero
+    or underflowing input, mx_fp_math.h:122 and 145; f32_to_bf16_rne, l.12 and l.24)."""
+    return torch.where(x == 0, torch.zeros_like(x), x)
+
+
+def MXGEMMINI(prod_e: int = 4, prod_m: int = 3, prod_floor: Optional[int] = PROD_FLOOR) -> Arithmetic:
+    """MX-Gemmini PE column, as spike computes it (mx_fp_math.h; gemmini.cc:1545-1548 and 1564), equal to
+    npu-exploration rtl_exact and its reference model fp8_matmul_model.py:
+    product significand truncated to prod_m bits, flushed below 2^prod_floor, then saturated
+    (`mx_product_quantize_trunc`, mx_fp_math.h:58-70, with `_saturation`);
+    both addends rounded RNE to the lane's float(e, m), added exactly, rounded once (`fp_add_exact(fp_quantize_rne,
+    fp_quantize_rne)`, mx_fp_math.h:173-187); cross-block: both rounded to bf16, added exactly, rounded to bf16
+    (`bf16_accum_add`, mx_fp_math.h:190-192). Every lane and bf16 rounding returns +0 for a zero (`_unsigned_zero`).
+    prod_floor None: no flush.
     The bf16 roundings are done on the bit pattern, `rounding.bf16`: 2.98x on an all-bf16 ladder, 1.23x on
     schedule.HW_FINAL against the float64 grid, bit-identical, and safe under torch.compile.
-    Validated against hardware for MXFP8_E4M3 operands with the default prod (4, 3) and schedule.HW_FINAL only;
-    other operand formats or prod widths run the same stages unchecked."""
-    lane = lambda x, e, m: (_bf16_rne(x) if (e, m) == (8, 7)
-                            else float_em.quantize(x, e, m, rounding_mode="rne", grid="ieee"))
+    Validated against hardware for MXFP8_E4M3 operands with the default prod (4, 3) and schedule.HW_FINAL; every
+    stage is checked against spike's functions for the e4m3, e4m2, e4m4, e5m2 and e3m4 products and every lane."""
+    limit, value = _saturation(prod_e, prod_m)
+    rne = lambda x, e, m: (_bf16_rne(x) if (e, m) == (8, 7)
+                           else float_em.quantize(x, e, m, rounding_mode="rne", grid="ieee"))
+    lane = lambda x, e, m: _unsigned_zero(rne(x, e, m))
     flush = (lambda x: x) if prod_floor is None else (lambda x: arith.flush_product(x, prod_floor))
     return Arithmetic(
         name=f"mxgemmini(prod=e{prod_e}m{prod_m})",
-        product=lambda a, b: arith.saturate_product(flush(arith.truncate_significand(a * b, prod_m)), prod_e, prod_m),
+        product=lambda a, b: arith.saturate(flush(arith.truncate_significand(a * b, prod_m)), limit, value),
         acc_add=lambda S, p, e, m: arith.exact_add(lane(S, e, m), lane(p, e, m), e, m),
         tile_add=lambda C, tile: arith.exact_add(lane(C, 8, 7), lane(tile, 8, 7), 8, 7),
     )

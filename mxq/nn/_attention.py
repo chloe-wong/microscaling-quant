@@ -10,7 +10,8 @@ Per batch row and KV head, in the order MX-Gemmini runs them, with the group's n
     Pᵀ (Tk×n·m) --pv.a-->  V (Tk×D) --pv.b-->  O = pv.reduce   n·m×D  fp32   contraction over the keys
     O cast to q's dtype
 
-Every operand is quantized once, right before its matmul, blocks along the contraction. Kᵀ and V are quantized
+Every operand is quantized once, right before its matmul, blocks along the contraction: `qk.block_size` of
+D, `pv.block_size` of the keys. Kᵀ and V are quantized
 once per KV head and shared by its n query heads (grouped-query attention), whose m query tokens of a chunk are
 the n·m columns of one call. That is the same arithmetic as one head at a time: a quantizer sees each column
 alone along its blocks, every reducer stage is elementwise in the output, and softmax is a function of its row.
@@ -30,8 +31,8 @@ scores are filled with the mask values (rounded as a computed one would be under
 runs on the whole row, so P is the same row. P·V then
 contracts over the kept keys only when P is exactly zero at the skipped ones (checked; it is not for a query
 row the mask removes entirely, as HF pads, whose row is uniform): the codes and scales of Pᵀ and V are sliced
-after quantization at block boundaries, and a block of zero codes adds a tile of zeros, which every reducer's
-tile_add returns unchanged (the golden's zero short-circuit; fp64_accum's GEMM may sum in another order, so
+after quantization at pv.block_size boundaries, and a block of zero codes adds a tile of zeros, which every reducer's
+tile_add returns unchanged (the reference model's zero short-circuit; fp64_accum's GEMM may sum in another order, so
 it is checked, not assumed, in the tests). With a causal mask and two chunks that is a quarter of the key
 blocks; with left padding, the padded keys of every chunk.
 
@@ -43,7 +44,6 @@ from typing import Optional
 
 import torch
 
-from ..block import BLOCK
 from ..scheme import Scheme
 from ._vector import rounder, softmax
 
@@ -62,9 +62,9 @@ ELEMENTS_PER_STEP = 1 << 26
 SLACK = 2.0 ** 16
 
 
-def _amax(P, X):
+def _amax(P, X, block_size):
     """The largest dequantized magnitude of each contraction row of codes P (K×n) with scales X: K float64."""
-    return (P.abs() * X.repeat_interleave(BLOCK, dim=0)[:P.shape[0]]).amax(dim=1).double()
+    return (P.abs() * X.repeat_interleave(block_size, dim=0)[:P.shape[0]]).amax(dim=1).double()
 
 
 @torch.no_grad()
@@ -88,6 +88,7 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[tor
     if chunk is not None and (chunk < 1 or chunk % rows):
         raise ValueError(f"attend: chunk {chunk} must be a positive multiple of the schemes' rows = {rows}")
     group = H // Hkv
+    bq, bv = qk.block_size, pv.block_size                                         # blocks along D, along the keys
     step = chunk or max(rows, ELEMENTS_PER_STEP // (group * Tk) // rows * rows)
     tiny = torch.finfo(torch.float32).tiny
     r = rounder(vector)                                                           # None: no rounding at all
@@ -100,7 +101,9 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[tor
         for h in range(Hkv):
             KT = qk.b(k[b, h].float().t().contiguous())                         # Kᵀ: D×Tk, blocks along D
             V = pv.b(v[b, h].float().contiguous())                              # V:  Tk×D, blocks along keys
-            kmax = _amax(*KT) if mb is not None else None
+            qk.check_scales(KT[1], D, "b (Kᵀ)")
+            pv.check_scales(V[1], Tk, "b (V)")
+            kmax = _amax(*KT, bq) if mb is not None else None
             heads = range(h * group, (h + 1) * group)
             for s in range(0, Tq, step):
                 e = min(s + step, Tq)
@@ -113,14 +116,14 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[tor
                     A = qk.a(Q.t().contiguous())
                     lo, hi = 0, Tk
                     if mb is not None:                                               # keys some query still sees
-                        bound = max(SLACK * abs(scale) * float((_amax(*A) * kmax).sum()), tiny)
+                        bound = max(SLACK * abs(scale) * float((_amax(*A, bq) * kmax).sum()), tiny)
                         mc = mb[s0:e0]
                         seen = (~((mc + bound == mc) & (mc - bound == mc)).all(dim=0)).nonzero()
                         if seen.numel():
-                            lo = int(seen[0]) // BLOCK * BLOCK
-                            hi = min(Tk, -(-(int(seen[-1]) + 1) // BLOCK) * BLOCK)
+                            lo = int(seen[0]) // bv * bv
+                            hi = min(Tk, -(-(int(seen[-1]) + 1) // bv) * bv)
                         else:
-                            hi = min(Tk, BLOCK)
+                            hi = min(Tk, bv)
                     if lo == 0 and hi == Tk:
                         S = r(qk.reduce(*A, *KT) * scale)                             # n·m×Tk
                         if mb is not None:
@@ -134,7 +137,7 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[tor
                     if (lo or hi < Tk) and (P[:, :lo].any() or P[:, hi:].any()):
                         lo, hi = 0, Tk                                               # a row with no live key: P is uniform
                     PA = pv.a(P.t().contiguous())                                    # Pᵀ: Tk×n·m, blocks along keys
-                    blk = slice(lo // BLOCK, -(-hi // BLOCK))                        # the kept key blocks' scales
+                    blk = slice(lo // bv, -(-hi // bv))                              # the kept key blocks' scales
                     O = pv.reduce(PA[0][lo:hi], PA[1][blk], V[0][lo:hi], V[1][blk])  # n·m×D
                     out[b, s0:e0, hs.start:hs.stop] = O.view(n, m, D).transpose(0, 1).to(q.dtype)
     return out

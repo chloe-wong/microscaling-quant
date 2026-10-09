@@ -16,7 +16,8 @@ __all__ = ["load", "fixed", "HW_FINAL"]
 
 Entry = Tuple[int, int]
 
-#: MX-Gemmini tapeout lanes (schedule_hw_final.csv, rtl_exact/acc_schedule.csv): 0-7 e4m4, 8-9 e4m5, 10-14 e4m6, 15 e8m7
+#: MX-Gemmini tapeout lanes: 0-7 e4m4, 8-9 e4m5, 10-14 e4m6, 15 e8m7. spike: libgemmini 92fae92 gemmini.cc:1409-1412
+#: (acc_e, acc_m); the same lanes as npu-exploration rtl_exact/acc_schedule.csv and config/hardware/baseline.json.
 HW_FINAL: List[Entry] = [(4, 4)] * 8 + [(4, 5)] * 2 + [(4, 6)] * 5 + [(8, 7)]
 
 

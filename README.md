@@ -4,7 +4,7 @@ Granular microscaling (MX) quantization ops, cleaned up from MXQuant. Pure PyTor
 
 ## Setup
 
-Requires Python >= 3.10 and torch.
+Requires Python >= 3.10 and torch >= 2.4.
 
 ```bash
 git clone git@github.com:chloe-wong/microscaling-quant.git
@@ -162,10 +162,10 @@ S = float_em.quantize(S, 8, 7, rounding_mode="rne", grid="ieee")   # bf16, as th
 
 | stage | `MXQUANT(prod_e, prod_m)` | `MXGEMMINI()` |
 |---|---|---|
-| product | fp32 multiply, then `float_em` ties-away on the qtorch grid to float(prod_e, prod_m) | `arith.truncate_significand` to prod_m fraction bits (flushed below 2^-16), then `arith.saturate_product` (448 for e4m3) |
+| product | fp32 multiply, then `float_em` ties-away on the qtorch grid to float(prod_e, prod_m) | `arith.truncate_significand` to prod_m fraction bits, `arith.flush_product` below 2^-16, then `arith.saturate` with spike's (limit, value) (e4m3: above 448 becomes 448) |
 | accumulate into lane float(e, m) | fp32 add, then `float_em` ties-away on the qtorch grid | both addends `float_em` RNE on the ieee grid, then `arith.exact_add` (exact sum, one RNE rounding) |
 | add finished block into output | fp32 add, no rounding | both rounded RNE to bf16, then `arith.exact_add` to bf16 |
-| matches | MXQuant `MXLinearSim._simulate_atw`, bit-identical | `rtl_exact` hardware output `Y_hw` and the gemmini golden model, bit-identical |
+| matches | MXQuant `MXLinearSim._simulate_atw`, bit-identical | `rtl_exact` hardware output `Y_hw` and its reference model `fp8_matmul_model.py`, bit-identical |
 | validated for | 6 operand formats | MXFP8_E4M3 operands, prod (4, 3), `HW_FINAL` lanes |
 
 ## Structure
@@ -191,7 +191,7 @@ mxq/
     kmeans.py        tables (weighted k-means on distinct codes, snapped, padded), pick (host nearest), lookup
   microxcaling/      Microsoft's microxcaling package, verbatim (MIT). Oracle only; see microxcaling/UPSTREAM.md
   rounding/          ties_away | rne | truncate, on float32 bit patterns (round_bits) or integers (round_int)
-  arith.py           exact_add, truncate_significand, flush_product, saturate_product: what a PE does between
+  arith.py           exact_add, truncate_significand, flush_product, saturate: what a PE does between
                      quantizations
   matmul/            the array dataflows: Y = Aᵀ·B from codes and scales, summed in the hardware's order
     _arithmetic.py   Arithmetic(product, acc_add, tile_add); MXQUANT(prod_e, prod_m) and MXGEMMINI(): the datapaths, stage by stage
@@ -201,7 +201,8 @@ mxq/
     _common.py       operand shape, dtype and device checks, schedule length check, per-block scale map
   _fp64_accum.py     fp64_accum: the same codes with no rounding inside the multiply, the error floor; not an architecture
   schedule.py        one float(e, m) per accumulator position: load(csv, rows), fixed(e, m, rows), HW_FINAL; exactly rows entries or ValueError
-  scheme.py          Scheme(name, a, b, reduce, rows=1): one explicit chain for one matmul, .matmul(A, B); no presets
+  scheme.py          Scheme(name, a, b, reduce, rows=1, block_size=32): one explicit chain for one matmul, .matmul(A, B);
+                     no presets
   nn/                putting Schemes into a model
     _linear.py       MXLinear: one nn.Linear through one Scheme; weight codes cached, token rows chunked (bit-identical)
     _patch.py        patch(model, rules): a Scheme per layer name or layer type, first match wins; (qk, pv) for an attention core; dry_run, revert
@@ -223,7 +224,7 @@ replaces, on CPU and CUDA.
 
 | module | oracle |
 |---|---|
-| `element_quant.float_em` | grid qtorch: `qtorch.quant.float_quantize`, 15 (e, m) pairs, 1M samples each; grid ieee: gemmini golden `fp_quantize_rne`; grid ocp: microxcaling `_quantize_elemwise` |
+| `element_quant.float_em` | grid qtorch: `qtorch.quant.float_quantize`, 15 (e, m) pairs, 1M samples each; grid ieee: `fp_quantize_rne` of the reference model `fp8_matmul_model.py`; grid ocp: microxcaling `_quantize_elemwise` |
 | `block.mxquant` | MXQuant `mx_block32_quantize` (two copies), codes and scales |
 | `block.mxgemmini` | MXQuant `quantize_mx_block32` (round nearest); operands of npu-exploration `rtl_exact` saved hardware test case |
 | `matmul.systolic` + `MXQUANT` | MXQuant `MXLinearSim._simulate_atw`, bit-identical, 3 schedules × 3 product formats |
@@ -238,10 +239,10 @@ replaces, on CPU and CUDA.
 | `nn` vector (`vector="bf16"`) | softmax and RMSNorm equal step-by-step references rounded with eager cast pairs; with no rounding, RMSNorm equals `LlamaRMSNorm` bit for bit (bf16 and fp32) and softmax equals `torch.softmax`; `attend` equals a per-head reference, every chunk size and compiled Arithmetic included; `vector=None` leaves a TinyLlama run's nll identical to all digits; revert restores the logits exactly; the exact core matches sdpa to the order of fp32 sums |
 | `block.ocp` | Microsoft `_quantize_mx`; codes checked to be in the format's code set, scales E8M0 |
 | `microxcaling/` | upstream microxcaling clone, AST-verbatim and numeric |
-| `rounding` | qtorch (ties away), torch bf16 and gemmini golden `_rne_e8` (RNE), golden `mx_product_quantize_trunc` (truncate); `rounding.bf16` equals the eager cast on subnormals, ±0, the largest finite values and Inf |
+| `rounding` | qtorch (ties away), torch bf16 and `_rne_e8` of the reference model `fp8_matmul_model.py` (RNE), its `mx_product_quantize_trunc` (truncate); `rounding.bf16` equals the eager cast on subnormals, ±0, the largest finite values and Inf |
 | `scale_factor` | MXQuant `mx_block32_quantize` scales; Microsoft `_quantize_mx` shared exponents |
 | `element_quant.formats` | microxcaling `ElemFormat` table |
-| `arith` | gemmini golden `fp_add_exact`, `bf16_accum_add`, `mx_product_quantize_trunc`, `mx_product_saturate`; `flush_product` is MxFPMul's PROD_FLOOR |
+| `arith` | `fp_add_exact`, `bf16_accum_add`, `mx_product_quantize_trunc`, `mx_product_saturate` of the reference model `fp8_matmul_model.py`; `flush_product` and `saturate` take their thresholds as arguments; `matmul.MXGEMMINI`'s floor and saturation are spike's (libgemmini 92fae92 `mx_fp_math.h:42-70`), checked against spike's functions for e4m3, e4m2, e4m4, e5m2 and e3m4 products |
 | `schedule` | MXQuant `load_schedule` on both CSV layouts and 400 real files |
 
 Running them needs `qtorch`, an MXQuant checkout (`MXQUANT_ROOT`) and an upstream microxcaling clone

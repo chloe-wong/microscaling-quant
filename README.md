@@ -32,6 +32,20 @@ V_hat = block.mxquant.dequantize(P, X, axis=0)             # == P * expand(X)
 `P` has `V`'s shape. `X` has `V`'s shape with the block axis of length ceil(len/32) (last block zero-padded).
 Formats: `MXFP8_E4M3`, `MXFP8_E5M2`, `MXFP6_E3M2`, `MXFP6_E2M3`, `MXFP4`, `FP32` (pass-through).
 
+The named quantizers are fixed pairs of the two steps. `block.compose` takes any pair, so a quantizer none of them
+covers is built from the parts without touching mxq:
+
+```python
+from mxq import block, scale_factor
+from mxq.element_quant import float_em
+
+P, X = block.compose(V, axis=0,
+                     scale=lambda amax: scale_factor.ocp(amax, emax=8),                            # step 1: X from the block max
+                     elem=lambda z: float_em.quantize(z, 4, 3, rounding_mode="rne", grid="ocp"))   # step 2: codes of V / X
+```
+
+`scale` and `elem` are both required; `None` skips that step (unit scales, or `P = V / X` unrounded).
+
 MX-Gemmini's LUT formats (`MXFP6_E3M2`, `MXFP6_E2M3`, `MXFP8_E5M2`, `MXFP8_E4M3` on the quad PE) send each
 element as a 4-bit index into a 16-entry table of element values, one table per 2^G columns of a K×n operand
 (rows of A, columns of B). `block.lut` is that operand, bit-identical to the chip's rule (npu-exploration
@@ -161,13 +175,15 @@ mxq/
   element_quant/     step 2   float_em(x, e, m, rounding_mode=, grid=)  grid: qtorch (MXQuant) | ieee (accumulators) | ocp (MX operands)
                               microsoft: microxcaling _quantize_elemwise, verbatim, reference only
                               formats.py: one table of e, m, emax, max_norm per format
-  block/             step 1 + step 2 composed; one interface: P, X = quantize(V, fmt, axis), V_hat = dequantize(P, X, axis)
+  block/             step 1 + step 2 composed: compose(V, scale=, elem=, axis) for any pair; the named ones share
+                     P, X = quantize(V, fmt, axis), V_hat = dequantize(P, X, axis)
     mxquant.py       scale_factor.mxquant + float_em grid=qtorch  -> MXQuant's simulation (all reported perplexities)
     mxgemmini.py     scale_factor.mxquant + float_em grid=ocp     -> MX-Gemmini operand codes
     ocp.py           scale_factor.ocp     + element_quant.microsoft  -> OCP MX v1.0, validated against mxq.microxcaling;
                      placement= top (the spec) | below_top | no_clip picks the scale rule, the element grid stays
     lut.py           mxgemmini + mxq.lut                         -> MX-Gemmini LUT operand (2-D; group, max_iters required)
-    _driver.py       split along an axis into 32-blocks, pad, run the two steps, reassemble; BLOCK = 32
+    _driver.py       compose (public as block.compose): split along an axis into 32-blocks, pad, run the two steps,
+                     reassemble; BLOCK = 32
   lut/               MX-Gemmini's look-up tables (layout from the luts branch, PR #1)
     formats.py       decode / encode element codes; values(fmt): what the finder tells apart; finder: the chip's index
     kmeans.py        tables (weighted k-means on distinct codes, snapped, padded), pick (host nearest), lookup

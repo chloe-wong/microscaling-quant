@@ -1,12 +1,12 @@
-"""Shared plumbing for the block quantizers in mxq.block: split a tensor into blocks along one axis, pad, run
-the two steps, and put codes / scales back into the caller's layout.
+"""The block quantization driver, `compose` (public as mxq.block.compose), and its plumbing: split a tensor into
+blocks along one axis, pad, run the two steps, and put codes / scales back into the caller's layout.
 
 Layout contract (same as MXQuant's mx_block32_quantize):
   quantize(V, axis) -> (P, X)   P: same shape as V, the codes
                                 X: V.shape with V.shape[axis] replaced by ceil(V.shape[axis]/block_size)
   V_hat = P * expand(X)  where expand repeats each scale block_size times along axis.
 """
-from typing import Callable, NamedTuple, Tuple
+from typing import Callable, NamedTuple, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -42,18 +42,27 @@ def scales_from_blocks(X: torch.Tensor, b: Blocks) -> torch.Tensor:
     return X.squeeze(-1).movedim(-1, b.axis).contiguous()
 
 
-def quantize(V: torch.Tensor, axis: int, block_size: int, passthrough: bool,
-             scale: Callable[[torch.Tensor], torch.Tensor],
-             elem: Callable[[torch.Tensor], torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Driver: block V, then X = scale(amax) (step 1) and P = elem(V / X) (step 2).
-    passthrough (FP32): identity codes, unit scales. Computes in float32."""
+def compose(V: torch.Tensor, *, scale: Optional[Callable[[torch.Tensor], torch.Tensor]],
+            elem: Optional[Callable[[torch.Tensor], torch.Tensor]],
+            axis: int = 0, block_size: int = BLOCK) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Block quantization from its two steps. Returns (P codes, X scales), float32.
+
+    scale(amax) -> X   step 1: amax is each block's max |value|, shape (..., nblocks, 1); X the same shape
+    elem(z) -> P       step 2: z = block / X, shape (..., nblocks, block_size); P the same shape
+
+    Both are required and either may be None: no scale step means X = 1, no element step means P = V / X.
+    Both None is the FP32 pass-through. V is split into blocks of `block_size` along `axis` (the last block
+    zero-padded) and computed in float32; P has V's shape, X has V's shape with `axis` of length
+    ceil(len / block_size). block.mxquant, block.mxgemmini and block.ocp are this with a fixed pair."""
     V = V.to(torch.float32)
     b = to_blocks(V, axis, block_size)
-    if passthrough:
-        P, X = b.data.clone(), torch.ones(b.data.shape[:-1] + (1,), dtype=torch.float32, device=V.device)
+    if scale is None:
+        X = torch.ones(b.data.shape[:-1] + (1,), dtype=torch.float32, device=V.device)
+        z = b.data
     else:
         X = scale(b.data.abs().amax(dim=-1, keepdim=True))
-        P = elem(b.data / X)
+        z = b.data / X
+    P = z.clone() if elem is None else elem(z)
     return codes_from_blocks(P, b), scales_from_blocks(X, b)
 
 

@@ -7,7 +7,7 @@ the three compositions. A matmul on the codes is a reducer with an Arithmetic an
     scale_factor      step 1: mxquant(amax) | ocp(amax, emax)
     element_quant     step 2: float_em with grid qtorch (== qtorch 0.2.0) | ieee (lane accumulators) | ocp (OCP element formats)
                               microsoft: microxcaling verbatim, reference only
-    block             step 1 + step 2, one interface P, X = quantize(V, fmt, axis):
+    block             step 1 + step 2: compose(V, scale=, elem=, axis) for any pair; four named ones, P, X = quantize(V, fmt, axis):
                         block.mxquant     MXQuant simulation     = scale_factor.mxquant + float_em grid=qtorch
                         block.mxgemmini   MX-Gemmini operands    = scale_factor.mxquant + float_em grid=ocp
                         block.ocp         OCP MX v1.0            = scale_factor.ocp     + element_quant.microsoft

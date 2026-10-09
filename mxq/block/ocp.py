@@ -44,9 +44,9 @@ def quantize(V: torch.Tensor, fmt: Union[str, Format], axis: int = 0, block_size
         scale = lambda amax: scale_factor.ocp_below_top(amax, f.emax, scale_bits)                 # noqa: E731
     else:
         scale = lambda amax: scale_factor.ocp_no_clip(amax, f, rounding_mode, scale_bits)         # noqa: E731
-    return _driver.quantize(V, axis, block_size, passthrough=f is None,
-                            scale=scale,                                                           # step 1
-                            elem=lambda z: microsoft.quantize(z, f, rounding_mode=rounding_mode))   # step 2
+    return _driver.compose(V, axis=axis, block_size=block_size,
+                           scale=None if f is None else scale,                                                  # step 1
+                           elem=None if f is None else lambda z: microsoft.quantize(z, f, rounding_mode=rounding_mode))   # step 2
 
 
 def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = _driver.BLOCK) -> torch.Tensor:

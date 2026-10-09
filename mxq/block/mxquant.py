@@ -27,9 +27,9 @@ def quantize(V: torch.Tensor, fmt: Union[str, Format], axis: int = 0,
              block_size: int = _driver.BLOCK) -> Tuple[torch.Tensor, torch.Tensor]:
     """MXQuant-simulation block quantize V along `axis`. Returns (P codes, X power-of-two scales), float32."""
     f = get(fmt)
-    return _driver.quantize(V, axis, block_size, passthrough=f is None,
-                            scale=scale_factor.mxquant,                       # step 1
-                            elem=lambda z: float_em.quantize(z, f.e, f.m))    # step 2
+    return _driver.compose(V, axis=axis, block_size=block_size,
+                           scale=None if f is None else scale_factor.mxquant,                          # step 1
+                           elem=None if f is None else lambda z: float_em.quantize(z, f.e, f.m))       # step 2
 
 
 def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = _driver.BLOCK) -> torch.Tensor:

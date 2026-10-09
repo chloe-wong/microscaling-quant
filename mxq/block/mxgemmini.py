@@ -54,9 +54,9 @@ def quantize(V: torch.Tensor, fmt: Union[str, Format], axis: int = 0, block_size
             z = float_em.quantize(z, via[0], via[1], rounding_mode=rounding_mode, grid="ieee")
         return float_em.quantize(z, f.e, f.m, rounding_mode=rounding_mode, grid="ocp")
 
-    return _driver.quantize(V, axis, block_size, passthrough=f is None,
-                            scale=lambda amax: scale_factor.mxquant(amax, scale_floor),                                   # step 1
-                            elem=elem)                                                                                    # step 2
+    return _driver.compose(V, axis=axis, block_size=block_size,
+                           scale=None if f is None else lambda amax: scale_factor.mxquant(amax, scale_floor),   # step 1
+                           elem=None if f is None else elem)                                                    # step 2
 
 
 def dequantize(P: torch.Tensor, X: torch.Tensor, axis: int = 0, block_size: int = _driver.BLOCK) -> torch.Tensor:

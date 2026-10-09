@@ -15,7 +15,7 @@ the three compositions. A matmul on the codes is a reducer with an Arithmetic an
     lut               MX-Gemmini's look-up tables: tables, pick, finder, lookup; bit-identical to the chip's rule
     microxcaling      Microsoft's microxcaling package, verbatim: the oracle block.ocp is validated against
     rounding          ties_away | rne | truncate, on float32 bit patterns or integers; shared by every quantizer
-    arith             exact_add, truncate_significand, saturate_product: what a PE does between quantizations
+    arith             exact_add, truncate_significand, flush_product, saturate_product: what a PE does between quantizations
     matmul            the array dataflows, Y = Aᵀ·B from codes and scales, one call for all three:
                       systolic (the PE column) | anchor_tree (MxGen's anchor tree) | adder_tree (a format per level);
                       Arithmetic = the three rounding points, with MXQUANT and MXGEMMINI as the two documented datapaths

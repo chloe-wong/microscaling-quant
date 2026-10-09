@@ -189,7 +189,8 @@ mxq/
     kmeans.py        tables (weighted k-means on distinct codes, snapped, padded), pick (host nearest), lookup
   microxcaling/      Microsoft's microxcaling package, verbatim (MIT). Oracle only; see microxcaling/UPSTREAM.md
   rounding/          ties_away | rne | truncate, on float32 bit patterns (round_bits) or integers (round_int)
-  arith.py           exact_add, truncate_significand, saturate_product: what a PE does between quantizations
+  arith.py           exact_add, truncate_significand, flush_product, saturate_product: what a PE does between
+                     quantizations
   matmul/            the array dataflows: Y = Aᵀ·B from codes and scales, summed in the hardware's order
     _arithmetic.py   Arithmetic(product, acc_add, tile_add); MXQUANT(prod_e, prod_m) and MXGEMMINI(): the datapaths, stage by stage
     _systolic.py     the PE column (`size` deep, 16 for the tapeout): per-k product, per-lane accumulate, per-block rescale and accumulate
@@ -212,11 +213,6 @@ Notes/FP_Notes.md    MXQuant vs OCP: scale factor and element quantization diffe
 grid: qtorch 0.2.0's (no true subnormals, top exponent reserved) vs the OCP element formats' (subnormals kept).
 `block.ocp` differs in both steps: block max in the format's top binade (448 for E4M3), OCP element grid.
 Details and measurements: `Notes/FP_Notes.md`.
-
-Name history: on `main` before this branch, `block_mxgemmini` was the name of what is now `block.mxquant`
-(qtorch grid). The current `block.mxgemmini` produces the hardware's operand codes (OCP grid). Code written
-against the old name must switch to `block.mxquant` to keep its numbers. `mxq.ocp` (Microsoft's code) is now
-`mxq.microxcaling`; `ocp` in mxq always means the OCP spec.
 
 ## Validation
 
@@ -243,7 +239,7 @@ replaces, on CPU and CUDA.
 | `rounding` | qtorch (ties away), torch bf16 and gemmini golden `_rne_e8` (RNE), golden `mx_product_quantize_trunc` (truncate); `rounding.bf16` equals the eager cast on subnormals, ±0, the largest finite values and Inf |
 | `scale_factor` | MXQuant `mx_block32_quantize` scales; Microsoft `_quantize_mx` shared exponents |
 | `element_quant.formats` | microxcaling `ElemFormat` table |
-| `arith` | gemmini golden `fp_add_exact`, `bf16_accum_add`, `mx_product_quantize_trunc`, `mx_product_saturate` |
+| `arith` | gemmini golden `fp_add_exact`, `bf16_accum_add`, `mx_product_quantize_trunc`, `mx_product_saturate`; `flush_product` is MxFPMul's PROD_FLOOR |
 | `schedule` | MXQuant `load_schedule` on both CSV layouts and 400 real files |
 
 Running them needs `qtorch`, an MXQuant checkout (`MXQUANT_ROOT`) and an upstream microxcaling clone

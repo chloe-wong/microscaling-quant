@@ -23,6 +23,9 @@ tied to an embedding all keep working. Call `refresh()` after changing the weigh
 """
 from typing import Optional
 
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+
 import torch
 from torch import nn
 
@@ -38,13 +41,26 @@ class MXLinear(nn.Module):
     def __init__(self, linear: nn.Linear, scheme: Scheme, chunk: Optional[int] = None,
                  cache_weights: bool = True):
         super().__init__()
+        self._setup(linear.weight, linear.bias, scheme, chunk, cache_weights)   # the same Parameters, not copies
+
+    @classmethod
+    def from_weight(cls, weight: torch.Tensor, scheme: Scheme, bias: Optional[torch.Tensor] = None,
+                    chunk: Optional[int] = None, cache_weights: bool = True) -> "MXLinear":
+        """An MXLinear computing x·weightᵀ (+ bias) from a bare out×in weight: no nn.Linear needed."""
+        self = cls.__new__(cls)
+        nn.Module.__init__(self)
+        self._setup(nn.Parameter(weight, requires_grad=False),
+                    None if bias is None else nn.Parameter(bias, requires_grad=False),
+                    scheme, chunk, cache_weights)
+        return self
+
+    def _setup(self, weight, bias, scheme, chunk, cache_weights):
         if chunk is not None and chunk < 1:
             raise ValueError(f"chunk must be >= 1, got {chunk}")
         if chunk is not None and chunk % scheme.rows:
             raise ValueError(f"chunk {chunk} must be a multiple of scheme {scheme.name!r} rows = {scheme.rows}")
-        self.in_features, self.out_features = linear.in_features, linear.out_features
-        self.weight = linear.weight                       # the same Parameter, not a copy
-        self.bias = linear.bias
+        self.out_features, self.in_features = weight.shape
+        self.weight, self.bias = weight, bias
         self.scheme = scheme
         self.chunk = chunk
         self.cache_weights = cache_weights

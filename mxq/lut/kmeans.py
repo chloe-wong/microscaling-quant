@@ -1,6 +1,7 @@
 """Fitting the tables and picking indices, for a K×n tensor of block codes: one table per 2^G columns.
 
     T = tables(P, fmt, group=G, max_iters=50)   ceil(n / 2^G) × SIZE values, each row sorted ascending
+                                                (weight=K×n: a weighted fit; None = the compiler's rule)
     I = pick(P, T, group=G)                     K×n: each code's nearest entry, ties to the lower index (any width)
     P_lut = lookup(I, T, group=G)
 
@@ -43,13 +44,23 @@ def _dedupe(C: torch.Tensor) -> torch.Tensor:
     return C.masked_fill(dup, float("inf")).sort(dim=1)[0]
 
 
-def tables(P: torch.Tensor, fmt, *, group: int, max_iters: int) -> torch.Tensor:
+def tables(P: torch.Tensor, fmt, *, group: int, max_iters: int, grad: torch.Tensor = None) -> torch.Tensor:
     """One SIZE-entry table per 2^group columns of P (K×n block codes, every one a value of fmt); the last
-    table covers the columns left over when n is not a multiple of 2^group."""
+    table covers the columns left over when n is not a multiple of 2^group.
+
+    weight: optional K×n, positive. Each code counts by the summed weight of its elements instead of how often
+    it occurs, so the quantile seeds and the Lloyd means favour heavily weighted elements (e.g. g^2 + lam*mean,
+    a loss-aware fit). None: the compiler's rule, bit for bit. Weighted sums are not exact, so a weighted fit
+    may differ in the last bit across devices."""
     f = _format(fmt)
     ng = _check(P, group)
     if not isinstance(max_iters, int) or isinstance(max_iters, bool) or max_iters < 0:
         raise ValueError(f"mxq.lut: max_iters {max_iters!r} must be a non-negative integer")
+    if grad is not None:
+        if grad.shape != P.shape:
+            raise ValueError(f"mxq.lut: weight shape {tuple(grad.shape)} must match P {tuple(P.shape)}")
+        if not torch.isfinite(grad).all() or (grad <= 0).any():
+            raise ValueError("mxq.lut: weight must be finite and positive (add a floor, e.g. g^2 + lam*mean(g^2))")
     dev = P.device
     all_vals, _, safe = (t.to(dev) for t in _tables(f.name))
     grid = torch.unique(all_vals[torch.isfinite(all_vals)])                     # sorted distinct values
@@ -61,8 +72,12 @@ def tables(P: torch.Tensor, fmt, *, group: int, max_iters: int) -> torch.Tensor:
     if (b >= nv).any() or not torch.equal(grid[b.clamp(max=nv - 1)], P):
         raise ValueError(f"mxq.lut: P holds a value that is not a {f.name} code; quantize it first")
     gid = (torch.arange(P.shape[1], device=dev) >> group).expand_as(b)
-    counts = torch.bincount((gid * nv + b).reshape(-1), minlength=ng * nv).reshape(ng, nv)
-    present = counts > 0
+    idx = (gid * nv + b).reshape(-1)
+    counts = torch.bincount(idx, minlength=ng * nv).reshape(ng, nv)
+    present = counts > 0                                                         # which codes occur: never weighted
+    if grad is not None:                                                       # how much each code matters
+        counts = torch.bincount(idx, weights=grad.to(dev).reshape(-1).double(),
+                                minlength=ng * nv).reshape(ng, nv)
     npres = present.sum(dim=1)
     x = grid.double()
 

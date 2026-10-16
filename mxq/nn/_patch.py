@@ -68,17 +68,17 @@ def _holds_core(module: nn.Module) -> bool:
     return hasattr(module, "q_proj") and hasattr(module, "k_proj")
 
 
-def _smoke(scheme: Scheme) -> None:
+def _smoke(scheme: Scheme, device: torch.device) -> None:
     g = torch.Generator().manual_seed(0)
     n = 2 * scheme.rows                                                         # a LUT activation: two whole groups
     K = 3 * scheme.block_size                                                   # three blocks: matmul checks the scales
-    scheme.matmul(torch.randn(K, n, generator=g), torch.randn(K, n, generator=g))
+    scheme.matmul(torch.randn(K, n, generator=g).to(device), torch.randn(K, n, generator=g).to(device))
 
 
-def _smoke_core(qk: Scheme, pv: Scheme) -> None:
+def _smoke_core(qk: Scheme, pv: Scheme, device: torch.device) -> None:
     g = torch.Generator().manual_seed(0)
     t = 2 * max(qk.block_size, pv.block_size) * max(qk.rows, pv.rows)          # whole key blocks, whole groups
-    q, k, v = (torch.randn(1, n, t, 32, generator=g) for n in (2, 1, 1))
+    q, k, v = (torch.randn(1, n, t, 32, generator=g).to(device) for n in (2, 1, 1))
     attend(q, k, v, None, 32 ** -0.5, qk, pv)
 
 
@@ -241,13 +241,16 @@ def patch(model: nn.Module, rules: Sequence[Rule], chunk: Optional[int] = None, 
     if vector["rmsnorm"] and not norms:
         raise ValueError("vector rmsnorm: the model has no module whose class name ends in RMSNorm")
 
-    for i in linear_rules:                                                      # fail now, not mid-run
+    # fail now, not mid-run; on the model's device: a compiled reducer on CPU tensors sends inductor to its C++
+    # backend, which cannot build the bf16 lane rounding (torch 2.5) and floods the log before falling back
+    device = next(model.parameters(), torch.empty(0)).device
+    for i in linear_rules:
         if rules[i][1] is not None:
-            _smoke(rules[i][1])
+            _smoke(rules[i][1], device)
     for i in core_rules:
-        _smoke_core(*rules[i][1])
+        _smoke_core(*rules[i][1], device)
     if vector["softmax"] and any(hit is None for _, _, hit in cores):
-        _smoke_core(EXACT, EXACT)
+        _smoke_core(EXACT, EXACT, device)
     eps = [_check_rmsnorm(n, m) for n, m in norms]
 
     table = [(name, m.in_features, m.out_features, hit,
